@@ -1,18 +1,23 @@
-// Package akshare is a thin adapter stub around an external AKShare data boundary.
+// Package akshare adapts AKShare (via Python helper or JSON cache) to data.Provider.
 //
-// Real network fetches are optional and skipped in unit tests. The default test path
-// uses internal/data/fixture. This package must compile without a live Python env.
+// Workflow:
+//  1. Prefer CacheDir JSON written by FetchAndCache / scripts/akshare_fetch.py --out
+//  2. Else invoke Python helper (unless SkipNetwork)
+//  3. Network/import failures return typed wrapped errors — never panic
 //
-// Boundary options (pick one at integration time):
-//  1. CLI: invoke `python scripts/akshare_fetch.py --date YYYY-MM-DD --out /tmp/...`
-//  2. HTTP: call a local sidecar that wraps AKShare REST endpoints
-//
-// Neither path is exercised by `go test ./...` when provider=fixture.
+// Default CI/tests use fixture.Provider. Set data.provider: akshare in YAML to use this.
 package akshare
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
+	"time"
 
 	"quantitative-trading/internal/data"
 	"quantitative-trading/internal/types"
@@ -20,24 +25,21 @@ import (
 
 // Config controls how the adapter reaches AKShare.
 type Config struct {
-	PythonBin  string // default "python3"
-	HelperPath string // path to scripts/akshare_fetch.py
-	HTTPBase   string // optional sidecar base URL; if set, preferred over CLI
-	SkipNetwork bool  // when true, all Load* return ErrSkipped
+	PythonBin   string // default "python3"
+	HelperPath  string // path to scripts/akshare_fetch.py
+	HTTPBase    string // optional sidecar base URL (reserved; CLI/cache preferred)
+	SkipNetwork bool   // when true, never exec helper; cache-only or ErrSkipped
+	CacheDir    string // optional directory of JSON blobs from prior fetches
 }
 
-// ErrSkipped is returned when network/CLI access is disabled (tests / offline).
-var ErrSkipped = fmt.Errorf("akshare: network/CLI skipped (use fixture provider in tests)")
-
-// Provider is a compile-time stub implementing data.Provider.
-// Methods either skip or shell out to the documented helper; they do not embed scraping logic.
+// Provider implements data.Provider using helper CLI and/or CacheDir.
 type Provider struct {
 	cfg Config
 }
 
 var _ data.Provider = (*Provider)(nil)
 
-// New constructs an AKShare adapter. Pass SkipNetwork=true for compile/smoke tests.
+// New constructs an AKShare adapter.
 func New(cfg Config) *Provider {
 	if cfg.PythonBin == "" {
 		cfg.PythonBin = "python3"
@@ -45,86 +47,500 @@ func New(cfg Config) *Provider {
 	return &Provider{cfg: cfg}
 }
 
-func (p *Provider) skip() error {
-	if p.cfg.SkipNetwork {
-		return ErrSkipped
-	}
-	return nil
+// FetchViaCLI invokes the Python helper with args and returns stdout.
+func (p *Provider) FetchViaCLI(args ...string) ([]byte, error) {
+	return p.fetchViaCLI(context.Background(), args...)
 }
 
-// FetchViaCLI documents / optionally invokes the Python helper. Returns combined output.
-// Unit tests should not call this with SkipNetwork=false without a mock helper.
-func (p *Provider) FetchViaCLI(args ...string) ([]byte, error) {
-	if err := p.skip(); err != nil {
-		return nil, err
+func (p *Provider) fetchViaCLI(ctx context.Context, args ...string) ([]byte, error) {
+	if p.cfg.SkipNetwork {
+		return nil, ErrSkipped
 	}
 	if p.cfg.HelperPath == "" {
-		return nil, fmt.Errorf("akshare: HelperPath not configured")
+		return nil, fmt.Errorf("%w: HelperPath not configured", ErrHelperFailed)
 	}
 	cmdArgs := append([]string{p.cfg.HelperPath}, args...)
-	cmd := exec.Command(p.cfg.PythonBin, cmdArgs...)
-	return cmd.CombinedOutput()
+	cmd := exec.CommandContext(ctx, p.cfg.PythonBin, cmdArgs...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	out := stdout.Bytes()
+	errText := strings.TrimSpace(stderr.String())
+	if err != nil {
+		msg := errText
+		if msg == "" {
+			msg = string(out)
+		}
+		if strings.Contains(msg, "pip install akshare") || strings.Contains(msg, "No module named 'akshare'") {
+			return out, fmt.Errorf("%w: %s", ErrAKShareImport, msg)
+		}
+		var er errorResult
+		if json.Unmarshal(out, &er) == nil && er.Error != "" {
+			msg = er.Error
+		} else if json.Unmarshal([]byte(errText), &er) == nil && er.Error != "" {
+			msg = er.Error
+		}
+		return out, wrapHelper(err, msg)
+	}
+	return out, nil
 }
 
+// FetchAndCache runs the helper and writes JSON under CacheDir using a stable key.
+func (p *Provider) FetchAndCache(ctx context.Context, cacheKey string, args ...string) ([]byte, error) {
+	out, err := p.fetchViaCLI(ctx, args...)
+	if err != nil {
+		return out, err
+	}
+	if p.cfg.CacheDir != "" && cacheKey != "" {
+		if werr := p.writeCache(cacheKey, out); werr != nil {
+			return out, fmt.Errorf("cache write: %w", werr)
+		}
+	}
+	return out, nil
+}
+
+func (p *Provider) cachePath(key string) string {
+	safe := strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_', r == '.':
+			return r
+		default:
+			return '_'
+		}
+	}, key)
+	return filepath.Join(p.cfg.CacheDir, safe+".json")
+}
+
+func (p *Provider) writeCache(key string, raw []byte) error {
+	if err := os.MkdirAll(p.cfg.CacheDir, 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(p.cachePath(key), raw, 0o644)
+}
+
+func (p *Provider) readCache(key string) ([]byte, error) {
+	if p.cfg.CacheDir == "" {
+		return nil, ErrNotCached
+	}
+	b, err := os.ReadFile(p.cachePath(key))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, ErrNotCached
+		}
+		return nil, err
+	}
+	return b, nil
+}
+
+// loadJSON tries cache first, then helper (unless SkipNetwork).
+func (p *Provider) loadJSON(ctx context.Context, cacheKey string, helperArgs ...string) ([]byte, error) {
+	if b, err := p.readCache(cacheKey); err == nil {
+		return b, nil
+	} else if err != ErrNotCached {
+		return nil, err
+	}
+	if p.cfg.SkipNetwork {
+		return nil, ErrSkipped
+	}
+	return p.FetchAndCache(ctx, cacheKey, helperArgs...)
+}
+
+func parseDate(s string) (types.TradeDate, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return types.TradeDate{}, fmt.Errorf("empty date")
+	}
+	return types.ParseTradeDate(s)
+}
+
+func optDate(s *string) (*types.TradeDate, error) {
+	if s == nil || strings.TrimSpace(*s) == "" {
+		return nil, nil
+	}
+	d, err := parseDate(*s)
+	if err != nil {
+		return nil, err
+	}
+	return &d, nil
+}
+
+func inRange(d, from, to types.TradeDate) bool {
+	if !from.Time().IsZero() && d.Before(from) {
+		return false
+	}
+	if !to.Time().IsZero() && d.After(to) {
+		return false
+	}
+	return true
+}
+
+// LoadCalendar implements data.Provider.
 func (p *Provider) LoadCalendar() ([]types.TradeDate, error) {
-	if err := p.skip(); err != nil {
+	raw, err := p.loadJSON(context.Background(), "calendar", "calendar")
+	if err != nil {
 		return nil, err
 	}
-	return nil, fmt.Errorf("akshare: LoadCalendar not wired — implement via CLI/HTTP sidecar")
+	var res calendarResult
+	if err := json.Unmarshal(raw, &res); err != nil {
+		return nil, wrapHelper(err, "calendar json")
+	}
+	if res.Error != "" {
+		return nil, wrapHelper(nil, res.Error)
+	}
+	out := make([]types.TradeDate, 0, len(res.Dates))
+	for _, s := range res.Dates {
+		d, err := parseDate(s)
+		if err != nil {
+			return nil, fmt.Errorf("calendar date %q: %w", s, err)
+		}
+		out = append(out, d)
+	}
+	return out, nil
 }
 
+// Securities implements data.Provider. BSE codes are filtered out.
 func (p *Provider) Securities() ([]types.SecurityMaster, error) {
-	if err := p.skip(); err != nil {
+	raw, err := p.loadJSON(context.Background(), "securities", "securities")
+	if err != nil {
 		return nil, err
 	}
-	return nil, fmt.Errorf("akshare: Securities not wired")
+	var res securitiesResult
+	if err := json.Unmarshal(raw, &res); err != nil {
+		return nil, wrapHelper(err, "securities json")
+	}
+	if res.Error != "" {
+		return nil, wrapHelper(nil, res.Error)
+	}
+	out := make([]types.SecurityMaster, 0, len(res.Securities))
+	for _, s := range res.Securities {
+		if IsBSE(s.TSCode) {
+			continue
+		}
+		board, ok := MapBoard(s.TSCode)
+		if !ok {
+			continue
+		}
+		if s.Board != "" {
+			board = types.Board(s.Board)
+			if board == types.BoardBSE {
+				continue
+			}
+		}
+		sm := types.SecurityMaster{
+			TSCode: types.SecurityID(s.TSCode),
+			Name:   s.Name,
+			Board:  board,
+		}
+		if s.ListDate != "" {
+			ld, err := parseDate(s.ListDate)
+			if err != nil {
+				return nil, err
+			}
+			sm.ListDate = ld
+		}
+		dd, err := optDate(s.DelistDate)
+		if err != nil {
+			return nil, err
+		}
+		sm.DelistDate = dd
+		out = append(out, sm)
+	}
+	return out, nil
 }
 
+// Bars implements data.Provider. Merges adj factors when available.
 func (p *Provider) Bars(tsCode types.SecurityID, from, to types.TradeDate) ([]types.Bar, error) {
-	if err := p.skip(); err != nil {
+	key := "bars_" + string(tsCode)
+	args := []string{"bars", "--symbol", string(tsCode)}
+	if !from.Time().IsZero() {
+		args = append(args, "--start", from.String())
+	} else {
+		args = append(args, "--start", "1990-01-01")
+	}
+	if !to.Time().IsZero() {
+		args = append(args, "--end", to.String())
+	} else {
+		args = append(args, "--end", time.Now().In(time.FixedZone("CST", 8*3600)).Format("2006-01-02"))
+	}
+	raw, err := p.loadJSON(context.Background(), key, args...)
+	if err != nil {
 		return nil, err
 	}
-	return nil, fmt.Errorf("akshare: Bars(%s) not wired", tsCode)
+	var res barsResult
+	if err := json.Unmarshal(raw, &res); err != nil {
+		return nil, wrapHelper(err, "bars json")
+	}
+	if res.Error != "" {
+		return nil, wrapHelper(nil, res.Error)
+	}
+
+	adjMap := map[string]float64{}
+	if adjRaw, aerr := p.loadJSON(context.Background(), "adj_"+string(tsCode), "adj", "--symbol", string(tsCode)); aerr == nil {
+		var ar adjResult
+		if json.Unmarshal(adjRaw, &ar) == nil {
+			for _, r := range ar.Adj {
+				adjMap[r.TradeDate] = r.AdjFactor
+			}
+		}
+	} else if aerr != ErrSkipped && aerr != ErrNotCached {
+		// Non-fatal: bars still usable with adj_factor from bar payload / 1.0
+		_ = aerr
+	}
+
+	out := make([]types.Bar, 0, len(res.Bars))
+	for _, b := range res.Bars {
+		d, err := parseDate(b.TradeDate)
+		if err != nil {
+			return nil, err
+		}
+		if !inRange(d, from, to) {
+			continue
+		}
+		adj := b.AdjFactor
+		if adj == 0 {
+			adj = 1
+		}
+		if v, ok := adjMap[b.TradeDate]; ok && v != 0 {
+			adj = v
+		}
+		code := b.TSCode
+		if code == "" {
+			code = string(tsCode)
+		}
+		out = append(out, types.Bar{
+			TradeDate: d,
+			TSCode:    types.SecurityID(code),
+			Open:      b.Open,
+			High:      b.High,
+			Low:       b.Low,
+			Close:     b.Close,
+			Volume:    b.Volume,
+			Amount:    b.Amount,
+			PreClose:  b.PreClose,
+			AdjFactor: adj,
+			Suspended: b.Suspended || b.Volume == 0,
+		})
+	}
+	return out, nil
 }
 
+// ST implements data.Provider (best-effort snapshot; may be empty with note in helper).
 func (p *Provider) ST() ([]types.STRecord, error) {
-	if err := p.skip(); err != nil {
+	raw, err := p.loadJSON(context.Background(), "st", "st")
+	if err != nil {
 		return nil, err
 	}
-	return nil, fmt.Errorf("akshare: ST not wired")
+	var res recordsResult
+	if err := json.Unmarshal(raw, &res); err != nil {
+		return nil, wrapHelper(err, "st json")
+	}
+	if res.Error != "" {
+		return nil, wrapHelper(nil, res.Error)
+	}
+	out := make([]types.STRecord, 0, len(res.Records))
+	for _, r := range res.Records {
+		if IsBSE(r.TSCode) {
+			continue
+		}
+		ed, err := parseDate(r.EntryDate)
+		if err != nil {
+			return nil, err
+		}
+		rd, err := optDate(r.RemoveDate)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, types.STRecord{
+			TSCode:     types.SecurityID(r.TSCode),
+			EntryDate:  ed,
+			RemoveDate: rd,
+			STType:     r.STType,
+		})
+	}
+	return out, nil
 }
 
+// Industry implements data.Provider (best-effort).
 func (p *Provider) Industry() ([]types.IndustryRecord, error) {
-	if err := p.skip(); err != nil {
+	raw, err := p.loadJSON(context.Background(), "industry", "industry")
+	if err != nil {
 		return nil, err
 	}
-	return nil, fmt.Errorf("akshare: Industry not wired")
+	var res industryResult
+	if err := json.Unmarshal(raw, &res); err != nil {
+		return nil, wrapHelper(err, "industry json")
+	}
+	if res.Error != "" {
+		return nil, wrapHelper(nil, res.Error)
+	}
+	out := make([]types.IndustryRecord, 0, len(res.Records))
+	for _, r := range res.Records {
+		if IsBSE(r.TSCode) {
+			continue
+		}
+		ed, err := parseDate(r.EffectiveDate)
+		if err != nil {
+			// tolerate missing — use epoch
+			ed, _ = types.ParseTradeDate("2000-01-01")
+		}
+		xd, err := optDate(r.ExpireDate)
+		if err != nil {
+			return nil, err
+		}
+		src := r.Source
+		if src == "" {
+			src = "EM_INDUSTRY"
+		}
+		out = append(out, types.IndustryRecord{
+			TSCode:        types.SecurityID(r.TSCode),
+			IndustryCode:  r.IndustryCode,
+			IndustryName:  r.IndustryName,
+			EffectiveDate: ed,
+			ExpireDate:    xd,
+			Source:        src,
+		})
+	}
+	return out, nil
 }
 
+// Financials implements data.Provider (best-effort; may be empty).
 func (p *Provider) Financials(tsCode types.SecurityID) ([]types.FinancialRow, error) {
-	if err := p.skip(); err != nil {
+	key := "financials_" + string(tsCode)
+	raw, err := p.loadJSON(context.Background(), key, "financials", "--symbol", string(tsCode))
+	if err != nil {
 		return nil, err
 	}
-	return nil, fmt.Errorf("akshare: Financials not wired")
+	var res financialsResult
+	if err := json.Unmarshal(raw, &res); err != nil {
+		return nil, wrapHelper(err, "financials json")
+	}
+	if res.Error != "" {
+		return nil, wrapHelper(nil, res.Error)
+	}
+	out := make([]types.FinancialRow, 0, len(res.Rows))
+	for _, r := range res.Rows {
+		rp, err := parseDate(r.ReportPeriod)
+		if err != nil {
+			continue
+		}
+		ad := rp
+		if r.AnnouncementDate != "" {
+			if d, err := parseDate(r.AnnouncementDate); err == nil {
+				ad = d
+			}
+		}
+		out = append(out, types.FinancialRow{
+			TSCode:           types.SecurityID(r.TSCode),
+			ReportPeriod:     rp,
+			AnnouncementDate: ad,
+			NetProfit:        r.NetProfit,
+			Revenue:          r.Revenue,
+			GrossProfit:      r.GrossProfit,
+			TotalAssets:      r.TotalAssets,
+			TotalLiabilities: r.TotalLiabilities,
+			Equity:           r.Equity,
+			OperatingCF:      r.OperatingCF,
+			StatementType:    r.StatementType,
+		})
+	}
+	return out, nil
 }
 
+// MarketValues implements data.Provider (best-effort snapshot / series).
 func (p *Provider) MarketValues(tsCode types.SecurityID, from, to types.TradeDate) ([]types.MarketValue, error) {
-	if err := p.skip(); err != nil {
+	key := "mv_" + string(tsCode)
+	args := []string{"mv", "--symbol", string(tsCode)}
+	if !from.Time().IsZero() {
+		args = append(args, "--start", from.String())
+	}
+	if !to.Time().IsZero() {
+		args = append(args, "--end", to.String())
+	}
+	raw, err := p.loadJSON(context.Background(), key, args...)
+	if err != nil {
 		return nil, err
 	}
-	return nil, fmt.Errorf("akshare: MarketValues not wired")
+	var res mvResult
+	if err := json.Unmarshal(raw, &res); err != nil {
+		return nil, wrapHelper(err, "mv json")
+	}
+	if res.Error != "" {
+		return nil, wrapHelper(nil, res.Error)
+	}
+	out := make([]types.MarketValue, 0, len(res.Values))
+	for _, m := range res.Values {
+		d, err := parseDate(m.TradeDate)
+		if err != nil {
+			continue
+		}
+		if !inRange(d, from, to) {
+			continue
+		}
+		out = append(out, types.MarketValue{
+			TradeDate:  d,
+			TSCode:     types.SecurityID(m.TSCode),
+			TotalShare: m.TotalShare,
+			FloatShare: m.FloatShare,
+			TotalMV:    m.TotalMV,
+			FloatMV:    m.FloatMV,
+		})
+	}
+	return out, nil
 }
 
+// IndexBars implements data.Provider.
 func (p *Provider) IndexBars(indexCode string, from, to types.TradeDate) ([]types.IndexBar, error) {
-	if err := p.skip(); err != nil {
+	key := "index_" + indexCode
+	args := []string{"index", "--symbol", indexCode}
+	if !from.Time().IsZero() {
+		args = append(args, "--start", from.String())
+	} else {
+		args = append(args, "--start", "1990-01-01")
+	}
+	if !to.Time().IsZero() {
+		args = append(args, "--end", to.String())
+	} else {
+		args = append(args, "--end", time.Now().In(time.FixedZone("CST", 8*3600)).Format("2006-01-02"))
+	}
+	raw, err := p.loadJSON(context.Background(), key, args...)
+	if err != nil {
 		return nil, err
 	}
-	return nil, fmt.Errorf("akshare: IndexBars not wired")
+	var res indexResult
+	if err := json.Unmarshal(raw, &res); err != nil {
+		return nil, wrapHelper(err, "index json")
+	}
+	if res.Error != "" {
+		return nil, wrapHelper(nil, res.Error)
+	}
+	out := make([]types.IndexBar, 0, len(res.Bars))
+	for _, b := range res.Bars {
+		d, err := parseDate(b.TradeDate)
+		if err != nil {
+			continue
+		}
+		if !inRange(d, from, to) {
+			continue
+		}
+		code := b.IndexCode
+		if code == "" {
+			code = indexCode
+		}
+		out = append(out, types.IndexBar{
+			TradeDate: d,
+			IndexCode: code,
+			Open:      b.Open,
+			Close:     b.Close,
+		})
+	}
+	return out, nil
 }
 
+// PublicTexts is not provided by AKShare; returns empty (or ErrSkipped when offline with no cache).
 func (p *Provider) PublicTexts(tsCode types.SecurityID, asofEnd types.TradeDate) ([]types.PublicText, error) {
-	if err := p.skip(); err != nil {
-		return nil, err
+	if p.cfg.SkipNetwork {
+		return nil, ErrSkipped
 	}
-	return nil, fmt.Errorf("akshare: PublicTexts not wired")
+	return nil, nil
 }

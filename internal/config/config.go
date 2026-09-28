@@ -129,10 +129,10 @@ type LLMTextConfig struct {
 }
 
 type LLMAuditConfig struct {
-	LogRawText            bool   `yaml:"log_raw_text"`
-	LogPromptFull         bool   `yaml:"log_prompt_full"`
-	LogStructuredSummary  bool   `yaml:"log_structured_summary"`
-	ComplianceNotice      string `yaml:"compliance_notice"`
+	LogRawText           bool   `yaml:"log_raw_text"`
+	LogPromptFull        bool   `yaml:"log_prompt_full"`
+	LogStructuredSummary bool   `yaml:"log_structured_summary"`
+	ComplianceNotice     string `yaml:"compliance_notice"`
 }
 
 type LLMConfig struct {
@@ -149,8 +149,11 @@ type LLMConfig struct {
 }
 
 type DataConfig struct {
-	Provider    string `yaml:"provider"` // fixture | akshare
-	FixtureDir  string `yaml:"fixture_dir"`
+	Provider        string `yaml:"provider"` // fixture | akshare
+	FixtureDir      string `yaml:"fixture_dir"`
+	AKSharePython   string `yaml:"akshare_python"`    // default python3
+	AKShareHelper   string `yaml:"akshare_helper"`    // path to scripts/akshare_fetch.py
+	AKShareCacheDir string `yaml:"akshare_cache_dir"` // JSON cache from prior fetches
 }
 
 // Default returns v1.2 locked defaults from the spec appendix A.
@@ -242,8 +245,11 @@ func Default() Config {
 			},
 		},
 		Data: DataConfig{
-			Provider:   "fixture",
-			FixtureDir: "testdata/fixtures",
+			Provider:        "fixture",
+			FixtureDir:      "testdata/fixtures",
+			AKSharePython:   "python3",
+			AKShareHelper:   "scripts/akshare_fetch.py",
+			AKShareCacheDir: "testdata/akshare_cache",
 		},
 	}
 }

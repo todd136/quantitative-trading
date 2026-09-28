@@ -44,8 +44,11 @@ backtest:
     rel: 1.0e-9
     abs: 1.0e-12
 data:
-  provider: "fixture"
+  provider: "fixture"          # fixture | akshare
   fixture_dir: "testdata/fixtures"
+  akshare_python: "python3"
+  akshare_helper: "scripts/akshare_fetch.py"
+  akshare_cache_dir: "testdata/akshare_cache"
 llm:
   enabled: false
   weight: 0.0

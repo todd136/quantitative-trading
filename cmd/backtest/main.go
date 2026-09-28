@@ -7,9 +7,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"quantitative-trading/internal/backtest"
 	"quantitative-trading/internal/config"
+	"quantitative-trading/internal/data"
+	"quantitative-trading/internal/data/akshare"
 	"quantitative-trading/internal/data/fixture"
 	"quantitative-trading/internal/factors"
 	"quantitative-trading/internal/llm"
@@ -17,6 +20,40 @@ import (
 	"quantitative-trading/internal/types"
 	"quantitative-trading/internal/universe"
 )
+
+func openProvider(cfg config.Config) (data.Provider, error) {
+	switch strings.ToLower(strings.TrimSpace(cfg.Data.Provider)) {
+	case "", "fixture":
+		fixDir := cfg.Data.FixtureDir
+		if !filepath.IsAbs(fixDir) {
+			fixDir = filepath.Clean(fixDir)
+		}
+		return fixture.New(fixDir)
+	case "akshare":
+		helper := cfg.Data.AKShareHelper
+		if helper == "" {
+			helper = "scripts/akshare_fetch.py"
+		}
+		if !filepath.IsAbs(helper) {
+			helper = filepath.Clean(helper)
+		}
+		py := cfg.Data.AKSharePython
+		if py == "" {
+			py = "python3"
+		}
+		cache := cfg.Data.AKShareCacheDir
+		// Prefer cache when populated; still allow live helper if cache miss.
+		// SkipNetwork is false here so FetchAndCache can fill cache when online.
+		return akshare.New(akshare.Config{
+			PythonBin:   py,
+			HelperPath:  helper,
+			CacheDir:    cache,
+			SkipNetwork: false,
+		}), nil
+	default:
+		return nil, fmt.Errorf("unknown data.provider %q (want fixture|akshare)", cfg.Data.Provider)
+	}
+}
 
 func main() {
 	cfgPath := flag.String("config", "configs/example.yaml", "path to YAML config")
@@ -29,13 +66,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	fixDir := cfg.Data.FixtureDir
-	if !filepath.IsAbs(fixDir) {
-		fixDir = filepath.Clean(fixDir)
-	}
-	prov, err := fixture.New(fixDir)
+	prov, err := openProvider(cfg)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "fixture: %v\n", err)
+		fmt.Fprintf(os.Stderr, "provider: %v\n", err)
 		os.Exit(1)
 	}
 

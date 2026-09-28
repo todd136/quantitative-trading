@@ -9,3 +9,6 @@ output/
 .DS_Store
 .env
 .env.*
+testdata/akshare_cache/
+__pycache__/
+*.pyc
