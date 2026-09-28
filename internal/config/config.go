@@ -93,13 +93,28 @@ type FloatTolConfig struct {
 	Abs float64 `yaml:"abs"`
 }
 
+// SampleSplitConfig is a fixed time-forward Train / Validate / OOS split (§6.3).
+// train: [start, train_end]; validate: (train_end, val_end]; oos: (val_end, end].
+type SampleSplitConfig struct {
+	TrainEnd string `yaml:"train_end"`
+	ValEnd   string `yaml:"val_end"`
+}
+
+// WalkForwardConfig is an optional skeleton for rolling windows (not fully executed yet).
+type WalkForwardConfig struct {
+	TrainYears int `yaml:"train_years"`
+	TestYears  int `yaml:"test_years"`
+}
+
 type BacktestConfig struct {
-	Benchmark   string         `yaml:"benchmark"`
-	RiskFree    float64        `yaml:"risk_free"`
-	InitialCash float64        `yaml:"initial_cash"`
-	FloatTol    FloatTolConfig `yaml:"float_tol"`
-	StartDate   string         `yaml:"start_date"`
-	EndDate     string         `yaml:"end_date"`
+	Benchmark    string            `yaml:"benchmark"`
+	RiskFree     float64           `yaml:"risk_free"`
+	InitialCash  float64           `yaml:"initial_cash"`
+	FloatTol     FloatTolConfig    `yaml:"float_tol"`
+	StartDate    string            `yaml:"start_date"`
+	EndDate      string            `yaml:"end_date"`
+	SampleSplit  SampleSplitConfig `yaml:"sample_split"`
+	WalkForward  WalkForwardConfig `yaml:"walk_forward"`
 }
 
 type LLMFilterConfig struct {
@@ -283,6 +298,21 @@ func (c Config) Validate() error {
 	}
 	if c.LLM.Enabled && c.LLM.Model.ModelID == "latest" {
 		return fmt.Errorf("llm.model.model_id must not be 'latest'")
+	}
+	ss := c.Backtest.SampleSplit
+	if ss.TrainEnd != "" || ss.ValEnd != "" {
+		if ss.TrainEnd == "" || ss.ValEnd == "" {
+			return fmt.Errorf("backtest.sample_split: both train_end and val_end required")
+		}
+		if ss.TrainEnd >= ss.ValEnd {
+			return fmt.Errorf("backtest.sample_split: train_end must be < val_end (got %s >= %s)", ss.TrainEnd, ss.ValEnd)
+		}
+		if c.Backtest.EndDate != "" && ss.ValEnd >= c.Backtest.EndDate {
+			return fmt.Errorf("backtest.sample_split: val_end must be < end_date")
+		}
+		if c.Backtest.StartDate != "" && ss.TrainEnd < c.Backtest.StartDate {
+			return fmt.Errorf("backtest.sample_split: train_end must be >= start_date")
+		}
 	}
 	return nil
 }

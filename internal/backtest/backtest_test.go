@@ -119,8 +119,8 @@ func TestMetricsDoNotInventNumbers(t *testing.T) {
 	if m.HasCurve {
 		t.Fatal("empty curve must not claim metrics")
 	}
-	if m.Sharpe != 0 || m.TotalReturn != 0 {
-		t.Fatal("zeros only when no curve")
+	if m.Sharpe.Available || m.TotalReturn.Available {
+		t.Fatal("metrics must be unavailable without curve")
 	}
 	snaps := []types.DailySnapshot{
 		{NAV: 100}, {NAV: 110}, {NAV: 105},
@@ -129,7 +129,7 @@ func TestMetricsDoNotInventNumbers(t *testing.T) {
 	if !m2.HasCurve {
 		t.Fatal("expected curve")
 	}
-	if !backtest.NearlyEqualDefault(m2.TotalReturn, 0.05) {
+	if !m2.TotalReturn.Available || !backtest.NearlyEqualDefault(m2.TotalReturn.Value, 0.05) {
 		t.Fatalf("total return %v", m2.TotalReturn)
 	}
 }

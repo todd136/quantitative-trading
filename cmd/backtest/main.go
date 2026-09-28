@@ -1,5 +1,5 @@
-// Command backtest runs a short fixture-window skeleton backtest and prints output paths.
-// Does not claim or invent performance metrics.
+// Command backtest runs a fixture/live-window backtest and writes nav/fills + §6 metrics reports.
+// Metrics are computed from real equity/turnover curves only — never invented.
 package main
 
 import (
@@ -42,8 +42,6 @@ func openProvider(cfg config.Config) (data.Provider, error) {
 			py = "python3"
 		}
 		cache := cfg.Data.AKShareCacheDir
-		// Prefer cache when populated; still allow live helper if cache miss.
-		// SkipNetwork is false here so FetchAndCache can fill cache when online.
 		return akshare.New(akshare.Config{
 			PythonBin:   py,
 			HelperPath:  helper,
@@ -55,14 +53,77 @@ func openProvider(cfg config.Config) (data.Provider, error) {
 	}
 }
 
+func resolveWindow(cal []types.TradeDate, cfg config.Config) (startIdx, endIdx int, err error) {
+	// endIdx is exclusive upper bound into cal for the signal/exec loop.
+	if len(cal) < 3 {
+		return 0, 0, fmt.Errorf("calendar too short")
+	}
+	startIdx, endIdx = 0, len(cal)-1
+
+	if cfg.Backtest.StartDate != "" {
+		sd, e := types.ParseTradeDate(cfg.Backtest.StartDate)
+		if e != nil {
+			return 0, 0, fmt.Errorf("start_date: %w", e)
+		}
+		found := false
+		for i, d := range cal {
+			if !d.Before(sd) {
+				startIdx = i
+				found = true
+				break
+			}
+		}
+		if !found {
+			return 0, 0, fmt.Errorf("start_date %s after calendar end", cfg.Backtest.StartDate)
+		}
+	} else {
+		// Legacy short fixture window: need momentum lookback headroom.
+		startIdx = len(cal) - 8
+		if startIdx < 260 {
+			startIdx = 260
+		}
+	}
+
+	if cfg.Backtest.EndDate != "" {
+		ed, e := types.ParseTradeDate(cfg.Backtest.EndDate)
+		if e != nil {
+			return 0, 0, fmt.Errorf("end_date: %w", e)
+		}
+		found := false
+		for i := len(cal) - 1; i >= 0; i-- {
+			if !cal[i].After(ed) {
+				endIdx = i + 1 // exclusive
+				found = true
+				break
+			}
+		}
+		if !found {
+			return 0, 0, fmt.Errorf("end_date %s before calendar start", cfg.Backtest.EndDate)
+		}
+	}
+
+	// Leave one day for T+1 exec beyond last signal day.
+	if endIdx > len(cal)-1 {
+		endIdx = len(cal) - 1
+	}
+	if endIdx <= startIdx+1 {
+		return 0, 0, fmt.Errorf("date window too short: startIdx=%d endIdx=%d", startIdx, endIdx)
+	}
+	return startIdx, endIdx, nil
+}
+
 func main() {
 	cfgPath := flag.String("config", "configs/example.yaml", "path to YAML config")
-	outDir := flag.String("out", "output/backtest_run", "output directory for nav/fills")
+	outDir := flag.String("out", "output/backtest_run", "output directory for nav/fills/reports")
 	flag.Parse()
 
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "config: %v\n", err)
+		os.Exit(1)
+	}
+	if _, err := backtest.ParseSampleSplit(cfg.Backtest); err != nil {
+		fmt.Fprintf(os.Stderr, "sample_split: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -120,19 +181,14 @@ func main() {
 	}
 	state := &backtest.PortfolioState{Cash: cfg.Backtest.InitialCash}
 
-	// Short window: last ~5 trading days before end (skip final day for T+1)
-	startIdx := len(cal) - 8
-	if startIdx < 260 {
-		startIdx = 260 // need momentum lookback headroom in fixtures
-	}
-	endIdx := len(cal) - 2
-	if endIdx <= startIdx {
-		fmt.Fprintf(os.Stderr, "calendar too short\n")
+	startIdx, endIdx, err := resolveWindow(cal, cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "window: %v\n", err)
 		os.Exit(1)
 	}
 
 	var snaps []types.DailySnapshot
-	for i := startIdx; i < endIdx; i++ {
+	for i := startIdx; i < endIdx-1; i++ { // -1: need next day for T+1
 		t := cal[i]
 		if !portfolio.IsRebalanceDay(t, cfg.Portfolio.RebalanceFreq, cfg.Portfolio.RebalanceWeekday, cal, calIndex) {
 			snaps = append(snaps, eng.MarkNAV(state, t))
@@ -173,7 +229,6 @@ func main() {
 		}
 		pipe := factors.BuildRawAndProcess(cfg, uCodes, industry, rawQ, rawV, rawM)
 
-		// LLM annotate (Noop when disabled — must not change composite path)
 		_, _ = plugin.Annotate(nil, t, uCodes)
 
 		comp := portfolio.CompositeEqualWeight(cfg, pipe.Scores, industry)
@@ -183,6 +238,14 @@ func main() {
 		if !ok {
 			break
 		}
+		// Respect end_date: do not exec past window
+		if cfg.Backtest.EndDate != "" {
+			ed, _ := types.ParseTradeDate(cfg.Backtest.EndDate)
+			if execDate.After(ed) {
+				snaps = append(snaps, eng.MarkNAV(state, t))
+				continue
+			}
+		}
 		nextAvail, _ := eng.NextTradeDate(execDate)
 		if err := eng.ApplyTargets(state, execDate, targets, nextAvail); err != nil {
 			fmt.Fprintf(os.Stderr, "exec %s: %v\n", execDate, err)
@@ -190,6 +253,8 @@ func main() {
 		}
 		snaps = append(snaps, eng.MarkNAV(state, execDate))
 	}
+
+	backtest.AnnotateDailyActivity(snaps, state.Fills)
 
 	navPath, err := backtest.WriteSnapshots(*outDir, snaps)
 	if err != nil {
@@ -202,11 +267,41 @@ func main() {
 		os.Exit(1)
 	}
 
+	var bench []types.IndexBar
+	if cfg.Backtest.Benchmark != "" {
+		from, to := types.TradeDate{}, types.TradeDate{}
+		if len(snaps) > 0 {
+			from, to = snaps[0].TradeDate, snaps[len(snaps)-1].TradeDate
+		}
+		bench, _ = prov.IndexBars(cfg.Backtest.Benchmark, from, to)
+		backtest.SortIndexBars(bench)
+	}
+
+	report, err := backtest.BuildReport(cfg, snaps, state.Fills, bench)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "report: %v\n", err)
+		os.Exit(1)
+	}
+	jsonPath, csvPath, mdPath, err := backtest.WriteAllReports(*outDir, report)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "write reports: %v\n", err)
+		os.Exit(1)
+	}
+
 	fmt.Println("spec_version:", cfg.Version)
 	fmt.Println("provider:", cfg.Data.Provider)
 	fmt.Println("llm.enabled:", cfg.LLM.Enabled)
 	fmt.Println("nav:", navPath)
 	fmt.Println("fills:", fillsPath)
+	fmt.Println("report_json:", jsonPath)
+	fmt.Println("metrics_csv:", csvPath)
+	fmt.Println("report_md:", mdPath)
 	fmt.Println("snapshots:", len(snaps), "fills:", len(state.Fills))
-	fmt.Println("note: metrics not claimed — compute from nav.csv if needed")
+	fmt.Println("formal_segment:", report.FormalSegment)
+	if formal, ok := report.Segments[string(report.FormalSegment)]; ok && formal.Metrics.HasCurve {
+		fmt.Printf("fixture_demo formal total_return: %.6f (computed from this run's NAV; not live market results)\n",
+			formal.Metrics.TotalReturn.Value)
+	} else {
+		fmt.Println("note: formal segment has no equity curve yet (too few days or empty OOS)")
+	}
 }

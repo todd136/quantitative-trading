@@ -43,6 +43,17 @@ backtest:
   float_tol:
     rel: 1.0e-9
     abs: 1.0e-12
+  # Fixture calendar spans ~2023-01 → 2025-03; demo split uses short recent window.
+  # For live/multi-year runs set e.g. start 2018-01-01 / train_end 2020-12-31 / val_end 2022-12-31 / end 2024-12-31.
+  start_date: "2025-03-01"
+  end_date: "2025-03-31"
+  sample_split:
+    train_end: "2025-03-12"
+    val_end: "2025-03-20"
+    # OOS = (val_end, end_date]
+  # walk_forward:            # optional skeleton (not fully executed yet)
+  #   train_years: 3
+  #   test_years: 1
 data:
   provider: "fixture"          # fixture | akshare
   fixture_dir: "testdata/fixtures"
