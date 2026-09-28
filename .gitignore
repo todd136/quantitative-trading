@@ -1,0 +1,11 @@
+output/
+*.tgz
+*.exe
+*.test
+/bin/
+.idea/
+.vscode/
+*.swp
+.DS_Store
+.env
+.env.*

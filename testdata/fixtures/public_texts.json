@@ -1,0 +1,26 @@
+[
+  {
+    "source_id": "ann_20250109_001",
+    "ts_code": "600000.SH",
+    "asof_ts": "2025-01-09T15:00:00+08:00",
+    "source_type": "exchange_announcement",
+    "text_ref": "hash:abc123",
+    "lang": "zh"
+  },
+  {
+    "source_id": "news_20250111_999",
+    "ts_code": "600000.SH",
+    "asof_ts": "2025-01-11T10:00:00+08:00",
+    "source_type": "company_news",
+    "text_ref": "hash:future999",
+    "lang": "zh"
+  },
+  {
+    "source_id": "ann_20250110_002",
+    "ts_code": "688001.SH",
+    "asof_ts": "2025-01-10T14:00:00+08:00",
+    "source_type": "exchange_announcement",
+    "text_ref": "hash:star001",
+    "lang": "zh"
+  }
+]

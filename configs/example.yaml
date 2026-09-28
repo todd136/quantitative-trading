@@ -1,0 +1,77 @@
+# config_a_share_mfactor_v1.2.yaml — matches 规则说明书 v1.2 appendix A
+version: "v1.2-20260928"
+market:
+  boards: ["SSE_MAIN", "SZSE_MAIN", "CHINEXT", "STAR"]   # 含科创板；不含 BSE（北交所）
+  exclude_st: true
+  require_star_eligibility: false
+universe:
+  min_list_trading_days: 60
+  min_adv_20: 20000000
+  min_adv_valid_days: 15
+factors:
+  quality:  {enabled: true, weight: 1.0}
+  value:    {enabled: true, weight: 1.0}
+  momentum: {enabled: true, weight: 1.0}
+  require_all: true
+processing:
+  winsorize: {method: "MAD", n: 5}
+  industry_neutral: true
+  industry_source: "SW_L1"
+  zscore: true
+portfolio:
+  N: 50
+  weight: "equal"
+  industry_cap_ratio: 0.15
+  rebalance_freq: "daily"
+  rebalance_weekday: 2
+signal:
+  signal_price: "close"
+  exec_price: "open"
+costs:
+  commission_bps: 3
+  stamp_tax_bps: 5
+  slippage_bps: 5
+execution:
+  rolling_unfilled: true
+  volume_constraint_enabled: false
+  buy_limit_handler: "renormalize"
+  lot_size: 100
+backtest:
+  benchmark: "000300.SH"
+  risk_free: 0.0
+  initial_cash: 100000000
+  float_tol:
+    rel: 1.0e-9
+    abs: 1.0e-12
+data:
+  provider: "fixture"
+  fixture_dir: "testdata/fixtures"
+llm:
+  enabled: false
+  weight: 0.0
+  score_pipeline: "zscore_only"
+  attach_point: "post_universe"
+  apply_to_holdings: false
+  filter:
+    enabled: false
+    min_confidence: 0.5
+    block_tags: []
+  model:
+    model_id: ""
+    prompt_version: "llm_prompt_v1"
+    temperature: 0.0
+    seed: 0
+    timeout_ms: 8000
+    max_retries: 0
+  cache:
+    enabled: true
+    key_fields: ["model_id", "prompt_version", "signal_date", "ts_code", "source_ids_hash"]
+  text:
+    timezone: "Asia/Shanghai"
+    require_asof_leq_signal: true
+    on_missing: "degrade_to_three_factor"
+  audit:
+    log_raw_text: false
+    log_prompt_full: false
+    log_structured_summary: true
+    compliance_notice: "non_investment_advice"
