@@ -28,10 +28,13 @@ type securityJSON struct {
 }
 
 type securitiesResult struct {
-	Securities []securityJSON `json:"securities"`
-	Excluded   int            `json:"excluded_bse_or_unknown"`
-	Source     string         `json:"source"`
-	Error      string         `json:"error"`
+	Securities      []securityJSON `json:"securities"`
+	Excluded        int            `json:"excluded_bse_or_unknown"`
+	ListDateMissing int            `json:"list_date_missing"`
+	ListDateSource  string         `json:"list_date_source"`
+	Note            string         `json:"note"`
+	Source          string         `json:"source"`
+	Error           string         `json:"error"`
 }
 
 type barJSON struct {

@@ -82,3 +82,40 @@ func TestOpenIsLimitUpOneWord(t *testing.T) {
 		t.Fatal("CannotBuyAtOpen should be true")
 	}
 }
+
+func TestMissingListDateSkipsMinListFilter(t *testing.T) {
+	cfg := config.Default()
+	cfg.Universe.MinListTradingDays = 60
+	cfg.Universe.MinADV20 = 0
+	cfg.Universe.MinADVValidDays = 0
+	cfg.Market.ExcludeST = false
+
+	td := types.NewTradeDate(2024, 1, 10)
+	bar := types.Bar{
+		TradeDate: td, TSCode: "600000.SH",
+		Open: 10, High: 10, Low: 10, Close: 10,
+		Volume: 1e6, Amount: 1e8, AdjFactor: 1,
+	}
+	smMissing := types.SecurityMaster{
+		TSCode: "600000.SH", Name: "X", Board: types.BoardSSEMain,
+		// ListDate zero → missing
+	}
+	ok, _ := universe.IsEligible(cfg, smMissing, bar, false, 0, 1e8, 20, true)
+	if !ok {
+		t.Fatal("missing list_date should degrade: skip min_list and remain eligible")
+	}
+	smNew := types.SecurityMaster{
+		TSCode: "600001.SH", Name: "Y", Board: types.BoardSSEMain,
+		ListDate: types.NewTradeDate(2024, 1, 2),
+	}
+	ok, _ = universe.IsEligible(cfg, smNew, bar, false, 5, 1e8, 20, false)
+	if ok {
+		t.Fatal("known short list_date with listDays<min must be rejected")
+	}
+	if universe.HasListDate(smMissing) {
+		t.Fatal("zero ListDate must report !HasListDate")
+	}
+	if !universe.HasListDate(smNew) {
+		t.Fatal("set ListDate must report HasListDate")
+	}
+}

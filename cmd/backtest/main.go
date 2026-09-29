@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"quantitative-trading/internal/backtest"
@@ -112,6 +113,54 @@ func resolveWindow(cal []types.TradeDate, cfg config.Config) (startIdx, endIdx i
 	return startIdx, endIdx, nil
 }
 
+
+// lookbackCalendarDays covers momentum(~252 trading days), ADV20, and min_list_trading_days(60).
+const lookbackCalendarDays = 400
+
+// resolveDataWindow returns [dataStart, dataEnd] for Bars/Adj preload covering the
+// backtest window plus factor lookback. Never uses zero/zero full history.
+func resolveDataWindow(cfg config.Config, cal []types.TradeDate) (from, to types.TradeDate, err error) {
+	if len(cal) == 0 {
+		return types.TradeDate{}, types.TradeDate{}, fmt.Errorf("empty calendar")
+	}
+	to = cal[len(cal)-1]
+	if cfg.Backtest.EndDate != "" {
+		ed, e := types.ParseTradeDate(cfg.Backtest.EndDate)
+		if e != nil {
+			return types.TradeDate{}, types.TradeDate{}, fmt.Errorf("end_date: %w", e)
+		}
+		to = ed
+	}
+	from = cal[0]
+	if cfg.Backtest.StartDate != "" {
+		sd, e := types.ParseTradeDate(cfg.Backtest.StartDate)
+		if e != nil {
+			return types.TradeDate{}, types.TradeDate{}, fmt.Errorf("start_date: %w", e)
+		}
+		from = types.TradeDate(sd.Time().AddDate(0, 0, -lookbackCalendarDays))
+	} else {
+		// Legacy fixture path: keep enough headroom before the signal window.
+		startIdx := len(cal) - 8
+		if startIdx < 260 {
+			startIdx = 260
+		}
+		if startIdx >= len(cal) {
+			startIdx = 0
+		}
+		from = types.TradeDate(cal[startIdx].Time().AddDate(0, 0, -lookbackCalendarDays))
+	}
+	if from.Before(cal[0]) {
+		from = cal[0]
+	}
+	if to.After(cal[len(cal)-1]) {
+		to = cal[len(cal)-1]
+	}
+	if !from.Before(to) && !from.Equal(to) {
+		return types.TradeDate{}, types.TradeDate{}, fmt.Errorf("data window invalid: %s .. %s", from, to)
+	}
+	return from, to, nil
+}
+
 func main() {
 	cfgPath := flag.String("config", "configs/example.yaml", "path to YAML config")
 	outDir := flag.String("out", "output/backtest_run", "output directory for nav/fills/reports")
@@ -142,23 +191,69 @@ func main() {
 
 	secs, _ := prov.Securities()
 	secMap := map[types.SecurityID]types.SecurityMaster{}
+	missingListDate := 0
 	for _, s := range secs {
 		secMap[s.TSCode] = s
+		if !universe.HasListDate(s) {
+			missingListDate++
+		}
 	}
+	if missingListDate > 0 {
+		fmt.Fprintf(os.Stderr,
+			"warning: %d/%d securities missing list_date — skipping min_list_trading_days for those (degrade); prefer real IPO dates in production\n",
+			missingListDate, len(secs))
+	} else if len(secs) > 0 {
+		fmt.Fprintf(os.Stderr, "securities list_date: populated for all %d names\n", len(secs))
+	}
+
+	// Optional debug-only universe sampling (smoke). Prefer date-window truncation for production.
+	if n := cfg.Data.MaxSymbols; n > 0 && len(secs) > n {
+		sort.Slice(secs, func(i, j int) bool { return secs[i].TSCode < secs[j].TSCode })
+		secs = secs[:n]
+		secMap = map[types.SecurityID]types.SecurityMaster{}
+		missingListDate = 0
+		for _, s := range secs {
+			secMap[s.TSCode] = s
+			if !universe.HasListDate(s) {
+				missingListDate++
+			}
+		}
+		fmt.Fprintf(os.Stderr, "warning: data.max_symbols=%d applied (debug smoke only; not for production)\n", n)
+		if missingListDate > 0 {
+			fmt.Fprintf(os.Stderr,
+				"warning: after max_symbols, %d/%d securities still missing list_date (min_list degraded)\n",
+				missingListDate, len(secs))
+		}
+	}
+
 	st, _ := prov.ST()
 	inds, _ := prov.Industry()
 
+	dataFrom, dataTo, err := resolveDataWindow(cfg, cal)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "data window: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Fprintf(os.Stderr, "bars preload window: %s .. %s (%d symbols)\n", dataFrom, dataTo, len(secMap))
+
 	barsByCode := map[types.SecurityID]map[string]types.Bar{}
 	barLists := map[types.SecurityID][]types.Bar{}
-	zero := types.TradeDate{}
+	codes := make([]types.SecurityID, 0, len(secMap))
 	for code := range secMap {
-		bs, _ := prov.Bars(code, zero, zero)
+		codes = append(codes, code)
+	}
+	sort.Slice(codes, func(i, j int) bool { return codes[i] < codes[j] })
+	for i, code := range codes {
+		bs, _ := prov.Bars(code, dataFrom, dataTo)
 		barLists[code] = bs
 		m := map[string]types.Bar{}
 		for _, b := range bs {
 			m[b.TradeDate.String()] = b
 		}
 		barsByCode[code] = m
+		if (i+1)%50 == 0 || i+1 == len(codes) {
+			fmt.Fprintf(os.Stderr, "bars preload progress: %d/%d\n", i+1, len(codes))
+		}
 	}
 
 	uctx := &universe.Context{
@@ -201,6 +296,7 @@ func main() {
 			uCodes = append(uCodes, s.Security.TSCode)
 			industry[s.Security.TSCode] = s.Industry
 		}
+		fmt.Fprintf(os.Stderr, "universe %s: eligible=%d of %d securities\n", t, len(univ), len(secMap))
 
 		rawQ := map[types.SecurityID]float64{}
 		rawV := map[types.SecurityID]float64{}

@@ -105,6 +105,12 @@ func ListTradingDays(calIndex map[string]int, listDate, t types.TradeDate) int {
 	return ti - li + 1
 }
 
+// HasListDate reports whether SecurityMaster.ListDate is a real (non-zero) IPO/list date.
+// Zero ListDate means upstream did not supply one — callers should degrade min_list filter.
+func HasListDate(sm types.SecurityMaster) bool {
+	return !sm.ListDate.Time().IsZero()
+}
+
 // MeanADV20 computes mean amount over up to 20 sessions ending at T.
 // Returns (mean, validDays). If validDays < minValid, caller should reject.
 func MeanADV20(bars []types.Bar, t types.TradeDate, window int) (float64, int) {
@@ -180,7 +186,9 @@ func CannotSellAtOpen(b types.Bar) bool {
 }
 
 // IsEligible evaluates §2.2 hard filters (AND). Unbuyable is returned separately.
-func IsEligible(cfg config.Config, sm types.SecurityMaster, barT types.Bar, isST bool, listDays int, adv float64, advValid int) (eligible bool, unbuyable bool) {
+// When listDateMissing is true (upstream empty list_date), min_list_trading_days is skipped
+// (explicit smoke/degrade path). Production should populate real list dates so this is rare.
+func IsEligible(cfg config.Config, sm types.SecurityMaster, barT types.Bar, isST bool, listDays int, adv float64, advValid int, listDateMissing bool) (eligible bool, unbuyable bool) {
 	boards := cfg.BoardSet()
 	if cfg.Market.ExcludeST && isST {
 		return false, false
@@ -188,7 +196,7 @@ func IsEligible(cfg config.Config, sm types.SecurityMaster, barT types.Bar, isST
 	if barT.Suspended {
 		return false, false
 	}
-	if listDays < cfg.Universe.MinListTradingDays {
+	if !listDateMissing && listDays < cfg.Universe.MinListTradingDays {
 		return false, false
 	}
 	if sm.DelistDate != nil && !barT.TradeDate.Before(*sm.DelistDate) {
@@ -226,7 +234,11 @@ func BuildUniverse(ctx *Context, t types.TradeDate, execBars map[types.SecurityI
 			continue
 		}
 		isST := IsSTOn(ctx.ST, code, t)
-		listDays := ListTradingDays(ctx.CalIndex, sm.ListDate, t)
+		listMissing := !HasListDate(sm)
+		listDays := 0
+		if !listMissing {
+			listDays = ListTradingDays(ctx.CalIndex, sm.ListDate, t)
+		}
 
 		// flatten bars for ADV
 		cal := ctx.Calendar
@@ -246,7 +258,7 @@ func BuildUniverse(ctx *Context, t types.TradeDate, execBars map[types.SecurityI
 		}
 		adv, advValid := MeanADV20(flat, t, 20)
 
-		okElig, _ := IsEligible(ctx.Cfg, sm, barT, isST, listDays, adv, advValid)
+		okElig, _ := IsEligible(ctx.Cfg, sm, barT, isST, listDays, adv, advValid, listMissing)
 		if !okElig {
 			continue
 		}

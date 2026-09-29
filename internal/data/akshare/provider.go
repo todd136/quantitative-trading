@@ -146,6 +146,46 @@ func (p *Provider) loadJSON(ctx context.Context, cacheKey string, helperArgs ...
 	return p.FetchAndCache(ctx, cacheKey, helperArgs...)
 }
 
+// loadJSONRetry retries transient helper/network failures (Eastmoney RemoteDisconnected etc.).
+func (p *Provider) loadJSONRetry(ctx context.Context, attempts int, cacheKey string, helperArgs ...string) ([]byte, error) {
+	if attempts < 1 {
+		attempts = 1
+	}
+	var last error
+	var out []byte
+	for i := 0; i < attempts; i++ {
+		out, last = p.loadJSON(ctx, cacheKey, helperArgs...)
+		if last == nil {
+			return out, nil
+		}
+		// Cache miss with SkipNetwork / not cached — do not retry.
+		if last == ErrSkipped || last == ErrNotCached || last == ErrAKShareImport {
+			return out, last
+		}
+		if i+1 >= attempts {
+			break
+		}
+		msg := last.Error()
+		transient := strings.Contains(msg, "RemoteDisconnected") ||
+			strings.Contains(msg, "Connection") ||
+			strings.Contains(msg, "Timeout") ||
+			strings.Contains(msg, "timed out") ||
+			strings.Contains(msg, "EOF") ||
+			strings.Contains(msg, "reset by peer") ||
+			strings.Contains(msg, "Temporary") ||
+			strings.Contains(msg, "helper failed")
+		if !transient {
+			return out, last
+		}
+		select {
+		case <-ctx.Done():
+			return out, ctx.Err()
+		case <-time.After(time.Duration(1<<i) * time.Second):
+		}
+	}
+	return out, last
+}
+
 func parseDate(s string) (types.TradeDate, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -251,18 +291,17 @@ func (p *Provider) Securities() ([]types.SecurityMaster, error) {
 
 // Bars implements data.Provider. Merges adj factors when available.
 func (p *Provider) Bars(tsCode types.SecurityID, from, to types.TradeDate) ([]types.Bar, error) {
-	key := "bars_" + string(tsCode)
-	args := []string{"bars", "--symbol", string(tsCode)}
+	start := "1990-01-01"
+	end := time.Now().In(time.FixedZone("CST", 8*3600)).Format("2006-01-02")
 	if !from.Time().IsZero() {
-		args = append(args, "--start", from.String())
-	} else {
-		args = append(args, "--start", "1990-01-01")
+		start = from.String()
 	}
 	if !to.Time().IsZero() {
-		args = append(args, "--end", to.String())
-	} else {
-		args = append(args, "--end", time.Now().In(time.FixedZone("CST", 8*3600)).Format("2006-01-02"))
+		end = to.String()
 	}
+	// Include window in cache key so date-scoped fetches do not reuse full-history blobs.
+	key := fmt.Sprintf("bars_%s_%s_%s", string(tsCode), start, end)
+	args := []string{"bars", "--symbol", string(tsCode), "--start", start, "--end", end}
 	raw, err := p.loadJSON(context.Background(), key, args...)
 	if err != nil {
 		return nil, err
@@ -276,14 +315,30 @@ func (p *Provider) Bars(tsCode types.SecurityID, from, to types.TradeDate) ([]ty
 	}
 
 	adjMap := map[string]float64{}
-	if adjRaw, aerr := p.loadJSON(context.Background(), "adj_"+string(tsCode), "adj", "--symbol", string(tsCode)); aerr == nil {
+	adjKey := "adj_" + string(tsCode)
+	// Date-scoped + CacheDir: use cached adj only — skip a second full-history
+	// network pull per symbol (bars carry adj_factor, defaulting to 1.0).
+	// Without CacheDir (unit tests / mock helper), still invoke the adj helper.
+	windowed := !from.Time().IsZero() && !to.Time().IsZero()
+	var adjRaw []byte
+	var aerr error
+	if windowed && p.cfg.CacheDir != "" {
+		adjRaw, aerr = p.readCache(adjKey)
+		if aerr == ErrNotCached {
+			aerr = nil
+			adjRaw = nil
+		}
+	} else {
+		adjRaw, aerr = p.loadJSON(context.Background(), adjKey, "adj", "--symbol", string(tsCode))
+	}
+	if aerr == nil && len(adjRaw) > 0 {
 		var ar adjResult
 		if json.Unmarshal(adjRaw, &ar) == nil {
 			for _, r := range ar.Adj {
 				adjMap[r.TradeDate] = r.AdjFactor
 			}
 		}
-	} else if aerr != ErrSkipped && aerr != ErrNotCached {
+	} else if aerr != nil && aerr != ErrSkipped && aerr != ErrNotCached {
 		// Non-fatal: bars still usable with adj_factor from bar payload / 1.0
 		_ = aerr
 	}
@@ -327,7 +382,7 @@ func (p *Provider) Bars(tsCode types.SecurityID, from, to types.TradeDate) ([]ty
 
 // ST implements data.Provider (best-effort snapshot; may be empty with note in helper).
 func (p *Provider) ST() ([]types.STRecord, error) {
-	raw, err := p.loadJSON(context.Background(), "st", "st")
+	raw, err := p.loadJSONRetry(context.Background(), 3, "st", "st")
 	if err != nil {
 		return nil, err
 	}
@@ -363,7 +418,7 @@ func (p *Provider) ST() ([]types.STRecord, error) {
 
 // Industry implements data.Provider (best-effort).
 func (p *Provider) Industry() ([]types.IndustryRecord, error) {
-	raw, err := p.loadJSON(context.Background(), "industry", "industry")
+	raw, err := p.loadJSONRetry(context.Background(), 3, "industry", "industry")
 	if err != nil {
 		return nil, err
 	}
@@ -374,14 +429,20 @@ func (p *Provider) Industry() ([]types.IndustryRecord, error) {
 	if res.Error != "" {
 		return nil, wrapHelper(nil, res.Error)
 	}
+	if res.Note != "" {
+		fmt.Fprintf(os.Stderr, "akshare industry note: %s (source=%s)\n", res.Note, res.Source)
+	}
 	out := make([]types.IndustryRecord, 0, len(res.Records))
 	for _, r := range res.Records {
 		if IsBSE(r.TSCode) {
 			continue
 		}
+		if strings.TrimSpace(r.IndustryCode) == "" && strings.TrimSpace(r.IndustryName) == "" {
+			continue // never invent industry membership
+		}
 		ed, err := parseDate(r.EffectiveDate)
 		if err != nil {
-			// tolerate missing — use epoch
+			// tolerate missing — use epoch; helper notes the gap
 			ed, _ = types.ParseTradeDate("2000-01-01")
 		}
 		xd, err := optDate(r.ExpireDate)
@@ -401,10 +462,15 @@ func (p *Provider) Industry() ([]types.IndustryRecord, error) {
 			Source:        src,
 		})
 	}
+	if len(out) == 0 {
+		fmt.Fprintf(os.Stderr, "akshare industry: empty membership (note=%q)\n", res.Note)
+	}
 	return out, nil
 }
 
 // Financials implements data.Provider (best-effort; may be empty).
+// Rows missing equity/revenue/total_assets (treated as zero upstream) are dropped —
+// never surface fabricated zeros as valid fundamentals for Quality/Value.
 func (p *Provider) Financials(tsCode types.SecurityID) ([]types.FinancialRow, error) {
 	key := "financials_" + string(tsCode)
 	raw, err := p.loadJSON(context.Background(), key, "financials", "--symbol", string(tsCode))
@@ -418,10 +484,19 @@ func (p *Provider) Financials(tsCode types.SecurityID) ([]types.FinancialRow, er
 	if res.Error != "" {
 		return nil, wrapHelper(nil, res.Error)
 	}
+	if res.Note != "" {
+		fmt.Fprintf(os.Stderr, "akshare financials %s note: %s (source=%s)\n", tsCode, res.Note, res.Source)
+	}
 	out := make([]types.FinancialRow, 0, len(res.Rows))
+	skippedInvalid := 0
 	for _, r := range res.Rows {
 		rp, err := parseDate(r.ReportPeriod)
 		if err != nil {
+			continue
+		}
+		// Reject incomplete fundamentals (helper should already omit these).
+		if r.Equity == 0 || r.Revenue == 0 || r.TotalAssets == 0 {
+			skippedInvalid++
 			continue
 		}
 		ad := rp
@@ -444,10 +519,16 @@ func (p *Provider) Financials(tsCode types.SecurityID) ([]types.FinancialRow, er
 			StatementType:    r.StatementType,
 		})
 	}
+	if skippedInvalid > 0 {
+		fmt.Fprintf(os.Stderr,
+			"akshare financials %s: skipped %d rows with missing equity/revenue/assets (not treating 0 as valid)\n",
+			tsCode, skippedInvalid)
+	}
 	return out, nil
 }
 
 // MarketValues implements data.Provider (best-effort snapshot / series).
+// Entries with TotalMV<=0 are dropped — missing MV is not a valid zero.
 func (p *Provider) MarketValues(tsCode types.SecurityID, from, to types.TradeDate) ([]types.MarketValue, error) {
 	key := "mv_" + string(tsCode)
 	args := []string{"mv", "--symbol", string(tsCode)}
@@ -468,13 +549,21 @@ func (p *Provider) MarketValues(tsCode types.SecurityID, from, to types.TradeDat
 	if res.Error != "" {
 		return nil, wrapHelper(nil, res.Error)
 	}
+	if res.Note != "" {
+		fmt.Fprintf(os.Stderr, "akshare mv %s note: %s (source=%s)\n", tsCode, res.Note, res.Source)
+	}
 	out := make([]types.MarketValue, 0, len(res.Values))
+	skipped := 0
 	for _, m := range res.Values {
 		d, err := parseDate(m.TradeDate)
 		if err != nil {
 			continue
 		}
 		if !inRange(d, from, to) {
+			continue
+		}
+		if m.TotalMV <= 0 {
+			skipped++
 			continue
 		}
 		out = append(out, types.MarketValue{
@@ -486,24 +575,25 @@ func (p *Provider) MarketValues(tsCode types.SecurityID, from, to types.TradeDat
 			FloatMV:    m.FloatMV,
 		})
 	}
+	if skipped > 0 {
+		fmt.Fprintf(os.Stderr, "akshare mv %s: skipped %d rows with total_mv<=0\n", tsCode, skipped)
+	}
 	return out, nil
 }
 
 // IndexBars implements data.Provider.
 func (p *Provider) IndexBars(indexCode string, from, to types.TradeDate) ([]types.IndexBar, error) {
-	key := "index_" + indexCode
-	args := []string{"index", "--symbol", indexCode}
+	start := "1990-01-01"
+	end := time.Now().In(time.FixedZone("CST", 8*3600)).Format("2006-01-02")
 	if !from.Time().IsZero() {
-		args = append(args, "--start", from.String())
-	} else {
-		args = append(args, "--start", "1990-01-01")
+		start = from.String()
 	}
 	if !to.Time().IsZero() {
-		args = append(args, "--end", to.String())
-	} else {
-		args = append(args, "--end", time.Now().In(time.FixedZone("CST", 8*3600)).Format("2006-01-02"))
+		end = to.String()
 	}
-	raw, err := p.loadJSON(context.Background(), key, args...)
+	key := fmt.Sprintf("index_%s_%s_%s", indexCode, start, end)
+	args := []string{"index", "--symbol", indexCode, "--start", start, "--end", end}
+	raw, err := p.loadJSONRetry(context.Background(), 3, key, args...)
 	if err != nil {
 		return nil, err
 	}

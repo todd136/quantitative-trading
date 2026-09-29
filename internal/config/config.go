@@ -169,6 +169,9 @@ type DataConfig struct {
 	AKSharePython   string `yaml:"akshare_python"`    // default python3
 	AKShareHelper   string `yaml:"akshare_helper"`    // path to scripts/akshare_fetch.py
 	AKShareCacheDir string `yaml:"akshare_cache_dir"` // JSON cache from prior fetches
+	// MaxSymbols caps securities loaded during Bars preload (0 = all).
+	// Debug-only smoke sampling — production runs must use date-window truncation, not permanent sampling.
+	MaxSymbols int `yaml:"max_symbols"`
 }
 
 // Default returns v1.2 locked defaults from the spec appendix A.
