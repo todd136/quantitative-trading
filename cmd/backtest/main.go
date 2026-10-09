@@ -370,7 +370,17 @@ func main() {
 		backtest.SortIndexBars(bench)
 	}
 
-	report, err := backtest.BuildReport(cfg, snaps, state.Fills, bench)
+	extras := backtest.ReportExtras{}
+	if len(inds) > 0 {
+		asof := types.TradeDate{}
+		if len(snaps) > 0 {
+			asof = snaps[len(snaps)-1].TradeDate
+		}
+		extras.IndustryLookup = backtest.BuildIndustryLookupFromRecords(inds, cfg.Processing.IndustrySource, asof)
+	}
+	// SkipCounts / FactorPanels / LlmCounters / AttributionPeriods remain unset until
+	// the engine and signal loop expose those counters — report stays honest N/A.
+	report, err := backtest.BuildReportWithExtras(cfg, snaps, state.Fills, bench, extras)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "report: %v\n", err)
 		os.Exit(1)

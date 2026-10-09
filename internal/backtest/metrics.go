@@ -89,10 +89,10 @@ func ComputeMetricsFull(in MetricsInput) Metrics {
 	m := Metrics{
 		RiskFreeUsed:  in.RiskFree,
 		AnnConvention: "252",
-		BrinsonAttribution: na("TODO §6.2: Brinson attribution not implemented"),
-		FactorLongShort:    na("TODO §6.2: factor long-short / layer returns not implemented"),
-		IndustryDistTS:     na("TODO §6.2: industry distribution time series not implemented"),
-		UnfilledSkipRate:   na("engine does not yet expose limit/suspend skip counts"),
+		BrinsonAttribution: na("see segment attribution object; N/A until industry weight/return periods provided"),
+		FactorLongShort:    na("see segment factor_layers; N/A until DailyFactorPanel with ForwardRet provided"),
+		IndustryDistTS:     na("see segment industry_distribution; N/A until IndustryLookup + Weights provided"),
+		UnfilledSkipRate:   na("涨跌停/停牌未成交 skip rate N/A: engine does not yet expose limit/suspend skip counts (ApplyTargets continues without tallying intended vs skipped orders)"),
 	}
 	snaps := in.Snaps
 	if len(snaps) < 2 {

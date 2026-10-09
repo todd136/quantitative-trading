@@ -25,32 +25,47 @@ type SegmentReport struct {
 	EndDate    string      `json:"end_date,omitempty"`
 	NSnapshots int         `json:"n_snapshots"`
 	Metrics    Metrics     `json:"metrics"`
+
+	// §6.2 extended skeletons (honest N/A when inputs missing)
+	Yearly               []YearlyMetrics       `json:"yearly,omitempty"`
+	IndustryDistribution []IndustryWeightPoint `json:"industry_distribution,omitempty"`
+	FactorExposure       []FactorExposurePoint `json:"factor_exposure,omitempty"`
+	Attribution          AttributionResult     `json:"attribution"`
+	FactorLayers         []FactorLayerResult   `json:"factor_layers,omitempty"`
+	LlmStats             LlmCoverageStats      `json:"llm_stats"`
 }
 
 // Report is the full backtest metrics export (§6.1 / §6.2).
 type Report struct {
-	SpecVersion       string                    `json:"spec_version"`
-	GeneratedAt       string                    `json:"generated_at"` // Asia/Shanghai
-	FormalSegment     SegmentName               `json:"formal_segment"`
-	FreezeNote        string                    `json:"freeze_note"`
-	WalkForwardNote   string                    `json:"walk_forward_note,omitempty"`
-	ConfigFreezeYAML  string                    `json:"config_freeze_yaml"`
-	ConfigVersion     string                    `json:"config_version"`
-	Benchmark         string                    `json:"benchmark,omitempty"`
-	RiskFree          float64                   `json:"risk_free"`
-	AnnConvention     string                    `json:"ann_convention"`
+	SpecVersion        string                   `json:"spec_version"`
+	GeneratedAt        string                   `json:"generated_at"` // Asia/Shanghai
+	FormalSegment      SegmentName              `json:"formal_segment"`
+	FreezeNote         string                   `json:"freeze_note"`
+	WalkForwardNote    string                   `json:"walk_forward_note,omitempty"`
+	ConfigFreezeYAML   string                   `json:"config_freeze_yaml"`
+	ConfigVersion      string                   `json:"config_version"`
+	Benchmark          string                   `json:"benchmark,omitempty"`
+	RiskFree           float64                  `json:"risk_free"`
+	AnnConvention      string                   `json:"ann_convention"`
 	TurnoverAssumption string                   `json:"turnover_assumption"`
-	NAPolicy          string                    `json:"na_policy"`
-	Segments          map[string]SegmentReport  `json:"segments"`
-	SegmentOrder      []string                  `json:"segment_order"`
+	NAPolicy           string                   `json:"na_policy"`
+	BrinsonMethod      string                   `json:"brinson_method"`
+	FactorLayerMethod  string                   `json:"factor_layer_method"`
+	Segments           map[string]SegmentReport `json:"segments"`
+	SegmentOrder       []string                 `json:"segment_order"`
 }
 
 const turnoverAssumption = `DailySnapshot.Turnover is two-way (sum of buy+sell fill notionals / day NAV). One-way = two-way/2. Annualized = daily average × 252. When Turnover is unset on snaps, metrics derive the same definition from fills if provided.`
 
-const naPolicy = `Metrics that cannot be computed (missing benchmark, <2 months, no fills/turnover, maxDD=0 for Calmar, etc.) are emitted with available=false and an explanatory note — never fabricated zeros presented as results.`
+const naPolicy = `Metrics that cannot be computed (missing benchmark, <2 months, no fills/turnover, maxDD=0 for Calmar, missing industry/factor panels, etc.) are emitted with available=false and an explanatory note — never fabricated zeros presented as results.`
 
-// BuildReport assembles a Report from snaps/fills/optional benchmark and config.
+// BuildReport assembles a Report from snaps/fills/optional benchmark and config (no extras).
 func BuildReport(cfg config.Config, snaps []types.DailySnapshot, fills []types.Fill, bench []types.IndexBar) (Report, error) {
+	return BuildReportWithExtras(cfg, snaps, fills, bench, ReportExtras{})
+}
+
+// BuildReportWithExtras is BuildReport plus optional §6.2 inputs (industry lookup, factor panels, …).
+func BuildReportWithExtras(cfg config.Config, snaps []types.DailySnapshot, fills []types.Fill, bench []types.IndexBar, extras ReportExtras) (Report, error) {
 	split, err := ParseSampleSplit(cfg.Backtest)
 	if err != nil {
 		return Report{}, err
@@ -70,6 +85,8 @@ func BuildReport(cfg config.Config, snaps []types.DailySnapshot, fills []types.F
 		AnnConvention:      "252",
 		TurnoverAssumption: turnoverAssumption,
 		NAPolicy:           naPolicy,
+		BrinsonMethod:      BrinsonMethodNote,
+		FactorLayerMethod:  FactorLayerMethodNote,
 		Segments:           map[string]SegmentReport{},
 	}
 
@@ -78,14 +95,14 @@ func BuildReport(cfg config.Config, snaps []types.DailySnapshot, fills []types.F
 	for _, b := range split.Segments {
 		segSnaps := FilterSnaps(snaps, b)
 		segFills := FilterFills(fills, b)
-		// Restrict benchmark to segment date span when possible
 		segBench := filterBench(bench, segSnaps)
-		m := ComputeMetricsFull(MetricsInput{
+		min := MetricsInput{
 			Snaps:     segSnaps,
 			Fills:     segFills,
 			Benchmark: segBench,
 			RiskFree:  cfg.Backtest.RiskFree,
-		})
+		}
+		m := ComputeMetricsFull(min)
 		sr := SegmentReport{
 			Name:       b.Name,
 			IsFormal:   b.IsFormal,
@@ -96,6 +113,7 @@ func BuildReport(cfg config.Config, snaps []types.DailySnapshot, fills []types.F
 			sr.StartDate = segSnaps[0].TradeDate.String()
 			sr.EndDate = segSnaps[len(segSnaps)-1].TradeDate.String()
 		}
+		enrichSegment(&sr, min, extras, segSnaps)
 		key := string(b.Name)
 		r.Segments[key] = sr
 		order = append(order, key)
@@ -106,6 +124,75 @@ func BuildReport(cfg config.Config, snaps []types.DailySnapshot, fills []types.F
 	r.FormalSegment = formal
 	r.SegmentOrder = order
 	return r, nil
+}
+
+func enrichSegment(sr *SegmentReport, min MetricsInput, extras ReportExtras, segSnaps []types.DailySnapshot) {
+	// 1) Per-year performance (always attempt when snaps exist)
+	sr.Yearly = ComputeYearlyMetrics(segSnaps, min)
+
+	// 2) Industry distribution TS
+	indPts, indStatus := ComputeIndustryDistribution(segSnaps, extras.IndustryLookup)
+	sr.IndustryDistribution = indPts
+	sr.Metrics.IndustryDistTS = indStatus
+
+	// 3) Factor exposure TS
+	facPts, facStatus := ComputeFactorExposure(segSnaps, extras.FactorPanels)
+	sr.FactorExposure = facPts
+	// Reflect exposure availability on a dedicated OptionalFloat via FactorLongShort sibling:
+	// IndustryDistTS already mirrors industry; keep FactorLongShort for layers below.
+	_ = facStatus
+
+	// 4) Skip rate
+	sr.Metrics.UnfilledSkipRate = ComputeUnfilledSkipRate(extras.SkipCounts)
+
+	// 5) Brinson
+	sr.Attribution = ComputeBrinsonAttribution(extras.AttributionPeriods)
+	if sr.Attribution.Available {
+		// Scalar summary = allocation+selection+interaction (total excess approx)
+		total := sr.Attribution.Allocation.Value + sr.Attribution.Selection.Value + sr.Attribution.Interaction.Value
+		sr.Metrics.BrinsonAttribution = avail(total)
+		sr.Metrics.BrinsonAttribution.Note = "sum of allocation+selection+interaction; see attribution object"
+	} else {
+		sr.Metrics.BrinsonAttribution = na(sr.Attribution.Note)
+	}
+
+	// 6) Factor layers / long-short
+	sr.FactorLayers = ComputeFactorLayers(extras.FactorPanels, extras.LayerQuantiles)
+	anyLayer := false
+	var lsVal float64
+	lsNote := ""
+	for _, fl := range sr.FactorLayers {
+		if !fl.Available {
+			continue
+		}
+		for _, lr := range fl.Layers {
+			if lr.Layer == "long_short" && lr.MeanReturn.Available {
+				anyLayer = true
+				lsVal = lr.MeanReturn.Value
+				lsNote = "long_short mean for factor " + fl.Factor + "; see factor_layers"
+			}
+		}
+	}
+	if anyLayer {
+		sr.Metrics.FactorLongShort = avail(lsVal)
+		sr.Metrics.FactorLongShort.Note = lsNote
+	} else if len(sr.FactorLayers) > 0 {
+		sr.Metrics.FactorLongShort = na(sr.FactorLayers[0].Note)
+	}
+
+	// Mark factor exposure status on IndustryDistTS sibling is awkward; stash note on FactorLongShort
+	// when layers N/A but exposure exists — prefer a clear Metrics flag via IndustryDistTS pattern:
+	if facStatus.Available && !anyLayer {
+		// Keep FactorLongShort as layer note; exposure series is in FactorExposure field.
+		if !sr.Metrics.FactorLongShort.Available {
+			sr.Metrics.FactorLongShort = na("factor exposure series available (" + strconv.Itoa(len(facPts)) + " days); long-short/layers still N/A without ForwardRet")
+		}
+	} else if !facStatus.Available && !sr.Metrics.FactorLongShort.Available {
+		// leave note from layers
+	}
+
+	// 8) LLM
+	sr.LlmStats = ComputeLlmCoverage(extras.LlmCounters)
 }
 
 func filterBench(bench []types.IndexBar, snaps []types.DailySnapshot) []types.IndexBar {
@@ -183,6 +270,41 @@ func WriteMetricsCSV(outDir string, r Report) (string, error) {
 				row.f.Note,
 			})
 		}
+		// Yearly total_return rows
+		for _, ym := range sr.Yearly {
+			_ = w.Write([]string{
+				seg,
+				strconv.FormatBool(sr.IsFormal),
+				fmt.Sprintf("yearly_%d_total_return", ym.Year),
+				strconv.FormatBool(ym.Metrics.TotalReturn.Available),
+				formatOpt(ym.Metrics.TotalReturn),
+				ym.Metrics.TotalReturn.Note,
+			})
+			_ = w.Write([]string{
+				seg,
+				strconv.FormatBool(sr.IsFormal),
+				fmt.Sprintf("yearly_%d_ann_return", ym.Year),
+				strconv.FormatBool(ym.Metrics.AnnReturn.Available),
+				formatOpt(ym.Metrics.AnnReturn),
+				ym.Metrics.AnnReturn.Note,
+			})
+			_ = w.Write([]string{
+				seg,
+				strconv.FormatBool(sr.IsFormal),
+				fmt.Sprintf("yearly_%d_sharpe", ym.Year),
+				strconv.FormatBool(ym.Metrics.Sharpe.Available),
+				formatOpt(ym.Metrics.Sharpe),
+				ym.Metrics.Sharpe.Note,
+			})
+			_ = w.Write([]string{
+				seg,
+				strconv.FormatBool(sr.IsFormal),
+				fmt.Sprintf("yearly_%d_max_drawdown", ym.Year),
+				strconv.FormatBool(ym.Metrics.MaxDrawdown.Available),
+				formatOpt(ym.Metrics.MaxDrawdown),
+				ym.Metrics.MaxDrawdown.Note,
+			})
+		}
 	}
 	w.Flush()
 	return path, w.Error()
@@ -254,6 +376,10 @@ func WriteReportMD(outDir string, r Report) (string, error) {
 	b.WriteString(r.NAPolicy + "\n")
 	b.WriteString("\n## Turnover assumption\n\n")
 	b.WriteString(r.TurnoverAssumption + "\n")
+	b.WriteString("\n## Attribution method (Brinson skeleton)\n\n")
+	b.WriteString(r.BrinsonMethod + "\n")
+	b.WriteString("\n## Factor layer method\n\n")
+	b.WriteString(r.FactorLayerMethod + "\n")
 	b.WriteString("\n## Frozen config dump\n\n```yaml\n")
 	b.WriteString(r.ConfigFreezeYAML)
 	b.WriteString("```\n")
@@ -280,9 +406,103 @@ func WriteReportMD(outDir string, r Report) (string, error) {
 			note := strings.ReplaceAll(row.f.Note, "|", "/")
 			b.WriteString(fmt.Sprintf("| %s | %v | %s | %s |\n", row.name, row.f.Available, val, note))
 		}
+
+		if len(sr.Yearly) > 0 {
+			b.WriteString("\n### Per-year performance\n\n")
+			b.WriteString("| Year | N | TotalReturn | AnnReturn | Sharpe | MaxDD | Note |\n|------|---|-------------|-----------|--------|-------|------|\n")
+			for _, ym := range sr.Yearly {
+				b.WriteString(fmt.Sprintf("| %d | %d | %s | %s | %s | %s | |\n",
+					ym.Year, ym.NSnapshots,
+					optCell(ym.Metrics.TotalReturn),
+					optCell(ym.Metrics.AnnReturn),
+					optCell(ym.Metrics.Sharpe),
+					optCell(ym.Metrics.MaxDrawdown),
+				))
+			}
+		}
+
+		b.WriteString("\n### Industry distribution TS\n\n")
+		if len(sr.IndustryDistribution) == 0 {
+			b.WriteString(fmt.Sprintf("- N/A: %s\n", sr.Metrics.IndustryDistTS.Note))
+		} else {
+			b.WriteString(fmt.Sprintf("- Points: %d (see report.json `industry_distribution`)\n", len(sr.IndustryDistribution)))
+			// Show last point summary
+			last := sr.IndustryDistribution[len(sr.IndustryDistribution)-1]
+			inds := make([]string, 0, len(last.Weights))
+			for k := range last.Weights {
+				inds = append(inds, k)
+			}
+			sort.Strings(inds)
+			parts := make([]string, 0, len(inds))
+			for _, k := range inds {
+				parts = append(parts, fmt.Sprintf("%s=%.3f", k, last.Weights[k]))
+			}
+			b.WriteString(fmt.Sprintf("- Last day `%s`: %s\n", last.TradeDate, strings.Join(parts, ", ")))
+		}
+
+		b.WriteString("\n### Factor exposure TS\n\n")
+		if len(sr.FactorExposure) == 0 {
+			b.WriteString("- N/A: DailyFactorPanel not provided (composite + per-factor portfolio-weighted exposure)\n")
+		} else {
+			b.WriteString(fmt.Sprintf("- Points: %d (see report.json `factor_exposure`)\n", len(sr.FactorExposure)))
+		}
+
+		b.WriteString("\n### Brinson attribution\n\n")
+		if !sr.Attribution.Available {
+			b.WriteString(fmt.Sprintf("- N/A: %s\n", sr.Attribution.Note))
+		} else {
+			b.WriteString(fmt.Sprintf("- Allocation: %s\n", optCell(sr.Attribution.Allocation)))
+			b.WriteString(fmt.Sprintf("- Selection: %s\n", optCell(sr.Attribution.Selection)))
+			b.WriteString(fmt.Sprintf("- Interaction: %s\n", optCell(sr.Attribution.Interaction)))
+			b.WriteString(fmt.Sprintf("- Note: %s\n", sr.Attribution.Note))
+		}
+
+		b.WriteString("\n### Factor layers / long-short\n\n")
+		if len(sr.FactorLayers) == 0 || !anyFactorLayerAvailable(sr.FactorLayers) {
+			note := "N/A"
+			if len(sr.FactorLayers) > 0 {
+				note = sr.FactorLayers[0].Note
+			}
+			b.WriteString(fmt.Sprintf("- %s\n", note))
+		} else {
+			for _, fl := range sr.FactorLayers {
+				if !fl.Available {
+					continue
+				}
+				b.WriteString(fmt.Sprintf("- **%s** (Q=%d):\n", fl.Factor, fl.NQuantile))
+				for _, lr := range fl.Layers {
+					b.WriteString(fmt.Sprintf("  - %s: %s (n_days=%d)\n", lr.Layer, optCell(lr.MeanReturn), lr.NDays))
+				}
+			}
+		}
+
+		b.WriteString("\n### LLM coverage / degrade\n\n")
+		if !sr.LlmStats.Available {
+			b.WriteString(fmt.Sprintf("- N/A: %s\n", sr.LlmStats.Note))
+		} else {
+			b.WriteString(fmt.Sprintf("- Coverage: %s\n", optCell(sr.LlmStats.CoverageRate)))
+			b.WriteString(fmt.Sprintf("- Degrade count: %s\n", optCell(sr.LlmStats.DegradeCount)))
+			b.WriteString(fmt.Sprintf("- Annotate calls: %s\n", optCell(sr.LlmStats.AnnotateCalls)))
+		}
 	}
 	b.WriteString("\n---\n*Not investment advice. Values above are computed from the run's equity/turnover curves only.*\n")
 	return path, os.WriteFile(path, []byte(b.String()), 0o644)
+}
+
+func optCell(f OptionalFloat) string {
+	if !f.Available {
+		return "N/A"
+	}
+	return strconv.FormatFloat(f.Value, 'f', 6, 64)
+}
+
+func anyFactorLayerAvailable(layers []FactorLayerResult) bool {
+	for _, fl := range layers {
+		if fl.Available {
+			return true
+		}
+	}
+	return false
 }
 
 // WriteAllReports writes report.json, metrics.csv, and report.md under outDir.
@@ -297,4 +517,36 @@ func WriteAllReports(outDir string, r Report) (jsonPath, csvPath, mdPath string,
 	}
 	mdPath, err = WriteReportMD(outDir, r)
 	return
+}
+
+// BuildIndustryLookupFromRecords maps each security to its latest industry code
+// (EffectiveDate ≤ asof when asof is set; otherwise latest by EffectiveDate).
+// Used by CLI to feed ReportExtras without importing universe into every caller.
+func BuildIndustryLookupFromRecords(recs []types.IndustryRecord, source string, asof types.TradeDate) map[types.SecurityID]string {
+	type best struct {
+		code string
+		eff  types.TradeDate
+	}
+	cur := map[types.SecurityID]best{}
+	asofSet := !asof.Time().IsZero()
+	for _, r := range recs {
+		if source != "" && r.Source != "" && r.Source != source {
+			continue
+		}
+		if asofSet && r.EffectiveDate.After(asof) {
+			continue
+		}
+		if asofSet && r.ExpireDate != nil && !asof.Before(*r.ExpireDate) {
+			continue
+		}
+		prev, ok := cur[r.TSCode]
+		if !ok || r.EffectiveDate.After(prev.eff) {
+			cur[r.TSCode] = best{code: r.IndustryCode, eff: r.EffectiveDate}
+		}
+	}
+	out := make(map[types.SecurityID]string, len(cur))
+	for k, v := range cur {
+		out[k] = v.code
+	}
+	return out
 }

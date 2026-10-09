@@ -138,14 +138,14 @@ CLI may print a **fixture demo** total return for the formal segment — that va
 | Cost ratio | Implemented |
 | Excess return, tracking error, IR, excess max DD | Implemented when benchmark series present |
 | Avg holdings count, max single-name weight | Implemented when Holdings/Weights on snaps |
-| Limit/suspend unfilled skip rate | **N/A stub** (engine does not yet count skips) |
-| Industry distribution time series | **N/A stub** |
-| Factor exposure time series | **N/A stub** |
-| Brinson attribution | **N/A stub** |
-| Factor long-short / layer returns | **N/A stub** |
-| Per-year breakdown tables | Not yet (overall / per-segment only) |
-| Walk-forward multi-window execution | Skeleton config only |
-| LLM coverage / degrade stats | N/A until LLM path enabled with counters |
+| Per-year breakdown tables | **Implemented** (per segment: overall + Train/Val/OOS when `sample_split` set; see `yearly` in report.json / report.md) |
+| Industry distribution time series | **Implemented when** `ReportExtras.IndustryLookup` + snap `Weights` present (CLI wires SW_L1 lookup from industry records); else N/A |
+| Factor exposure time series | **Skeleton**: computes portfolio-weighted composite + per-factor exposure when `DailyFactorPanel` + `Weights` provided; else N/A (CLI does not yet persist daily panels) |
+| Limit/suspend unfilled skip rate | **N/A** until engine exposes skip counters (`ExecutionSkipCounts`); note explains ApplyTargets does not tally yet |
+| Brinson / simple attribution | **Skeleton**: method documented in report; computes Allocation/Selection/Interaction when `AttributionPeriods` provided; else N/A |
+| Factor long-short / layer returns | **Skeleton**: quantile + long-short only when panels include real `ForwardRet`; refuses to invent forward returns |
+| Walk-forward multi-window execution | Skeleton config / note only — no fake multi-window runs |
+| LLM coverage / degrade stats | N/A until LLM path enabled **with counters** (`LlmRunCounters`); schema ready |
 
 ## Layout
 
