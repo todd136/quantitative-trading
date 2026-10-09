@@ -145,8 +145,8 @@ func enrichSegment(sr *SegmentReport, min MetricsInput, extras ReportExtras, seg
 	// 4) Skip rate
 	sr.Metrics.UnfilledSkipRate = ComputeUnfilledSkipRate(extras.SkipCounts)
 
-	// 5) Brinson
-	sr.Attribution = ComputeBrinsonAttribution(extras.AttributionPeriods)
+	// 5) Brinson (filter periods to this segment's date span)
+	sr.Attribution = ComputeBrinsonAttribution(FilterAttributionPeriods(extras.AttributionPeriods, segSnaps))
 	if sr.Attribution.Available {
 		// Scalar summary = allocation+selection+interaction (total excess approx)
 		total := sr.Attribution.Allocation.Value + sr.Attribution.Selection.Value + sr.Attribution.Interaction.Value

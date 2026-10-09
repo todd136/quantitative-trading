@@ -89,7 +89,7 @@ func ComputeMetricsFull(in MetricsInput) Metrics {
 	m := Metrics{
 		RiskFreeUsed:  in.RiskFree,
 		AnnConvention: "252",
-		BrinsonAttribution: na("see segment attribution object; N/A until industry weight/return periods provided"),
+		BrinsonAttribution: na("see segment attribution object; N/A until AttributionPeriods built from Weights+IndustryLookup+bars"),
 		FactorLongShort:    na("see segment factor_layers; N/A until DailyFactorPanel with ForwardRet provided"),
 		IndustryDistTS:     na("see segment industry_distribution; N/A until IndustryLookup + Weights provided"),
 		UnfilledSkipRate:   na("涨跌停/停牌未成交 skip rate N/A until ExecutionSkipCounts provided"),

@@ -10,10 +10,14 @@ import (
 )
 
 // BrinsonMethodNote documents the simple Brinson-style decomposition used when inputs exist.
-const BrinsonMethodNote = `Simple Brinson (BF) skeleton: period excess ≈ Allocation + Selection + Interaction.
+const BrinsonMethodNote = `Simple Brinson (BF): period excess ≈ Allocation + Selection + Interaction.
 Allocation_i = (w_p,i - w_b,i) * r_b,i; Selection_i = w_b,i * (r_p,i - r_b,i);
-Interaction_i = (w_p,i - w_b,i) * (r_p,i - r_b,i). Summed over industries.
-Requires portfolio industry weights, benchmark industry weights, and industry returns for the same period.
+Interaction_i = (w_p,i - w_b,i) * (r_p,i - r_b,i). Summed over industries; periods averaged.
+Portfolio: industry weights from DailySnapshot.Weights + IndustryLookup (renormalized over equity industries; cash sleeve omitted);
+  industry return = portfolio-weight-weighted mean of real close-to-close stock returns within the industry.
+Benchmark: IndexBars have no industry breakdown, so official index constituent industry weights are unavailable.
+  Approximation = equal-weight of that day's eligible universe (or all names with industry+return when universe not supplied);
+  industry return = equal-weight mean of real close-to-close returns. Never invents returns.
 Not investment advice; research diagnostic only.`
 
 // FactorLayerMethodNote documents layered / long-short factor return construction.
@@ -102,11 +106,18 @@ type DailyFactorPanel struct {
 
 // IndustryPeriodReturn is one industry's portfolio/benchmark weight and return for attribution.
 type IndustryPeriodReturn struct {
-	Industry   string
-	PortWeight float64
+	Industry    string
+	PortWeight  float64
 	BenchWeight float64
-	PortReturn float64
+	PortReturn  float64
 	BenchReturn float64
+}
+
+// AttributionPeriod is one Brinson period: weights at FromDate, returns FromDate→ToDate.
+type AttributionPeriod struct {
+	FromDate   string                 `json:"from_date"`
+	ToDate     string                 `json:"to_date"`
+	Industries []IndustryPeriodReturn `json:"industries"`
 }
 
 // ReportExtras carries optional §6.2 inputs. Missing fields → Available=false + honest notes.
@@ -115,8 +126,8 @@ type ReportExtras struct {
 	IndustryLookup map[types.SecurityID]string
 	// FactorPanels enable factor exposure TS and (with ForwardRet) layered / long-short returns.
 	FactorPanels []DailyFactorPanel
-	// AttributionPeriods: when non-empty, Brinson skeleton is computed; else N/A with method note.
-	AttributionPeriods [][]IndustryPeriodReturn
+	// AttributionPeriods: when non-empty (and overlapping the segment), Brinson is computed; else N/A.
+	AttributionPeriods []AttributionPeriod
 	// SkipCounts: when non-nil with intended orders > 0, unfilled skip rate is computed.
 	SkipCounts *ExecutionSkipCounts
 	// LlmCounters: when non-nil, coverage/degrade stats are filled; else N/A.
@@ -318,11 +329,31 @@ func weightedExposure(weights map[types.SecurityID]float64, scores map[types.Sec
 	return sum / sumW, true
 }
 
+// FilterAttributionPeriods keeps periods whose FromDate falls within the snap date span.
+func FilterAttributionPeriods(periods []AttributionPeriod, snaps []types.DailySnapshot) []AttributionPeriod {
+	if len(periods) == 0 || len(snaps) == 0 {
+		return nil
+	}
+	lo := snaps[0].TradeDate.String()
+	hi := snaps[len(snaps)-1].TradeDate.String()
+	out := make([]AttributionPeriod, 0, len(periods))
+	for _, p := range periods {
+		if p.FromDate < lo || p.FromDate > hi {
+			continue
+		}
+		if len(p.Industries) == 0 {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
 // ComputeBrinsonAttribution sums Allocation/Selection/Interaction over industries for each period, then averages.
-func ComputeBrinsonAttribution(periods [][]IndustryPeriodReturn) AttributionResult {
+func ComputeBrinsonAttribution(periods []AttributionPeriod) AttributionResult {
 	out := AttributionResult{Method: BrinsonMethodNote}
 	if len(periods) == 0 {
-		out.Note = "Brinson attribution N/A: no industry weight/return periods provided"
+		out.Note = "Brinson attribution N/A: no industry weight/return periods provided (need Weights + IndustryLookup + real close-to-close bars; benchmark uses EW universe proxy)"
 		out.Allocation = na(out.Note)
 		out.Selection = na(out.Note)
 		out.Interaction = na(out.Note)
@@ -332,11 +363,11 @@ func ComputeBrinsonAttribution(periods [][]IndustryPeriodReturn) AttributionResu
 	nInd := 0
 	nPer := 0
 	for _, per := range periods {
-		if len(per) == 0 {
+		if len(per.Industries) == 0 {
 			continue
 		}
 		var a, s, inter float64
-		for _, row := range per {
+		for _, row := range per.Industries {
 			dw := row.PortWeight - row.BenchWeight
 			dr := row.PortReturn - row.BenchReturn
 			a += dw * row.BenchReturn
@@ -361,8 +392,186 @@ func ComputeBrinsonAttribution(periods [][]IndustryPeriodReturn) AttributionResu
 	out.Allocation = avail(sumA / float64(nPer))
 	out.Selection = avail(sumS / float64(nPer))
 	out.Interaction = avail(sumI / float64(nPer))
-	out.Note = fmt.Sprintf("averaged over %d period(s); method documented in method field", nPer)
+	out.Note = fmt.Sprintf("averaged over %d period(s); EW-universe benchmark proxy; method documented in method field", nPer)
 	return out
+}
+
+// BuildAttributionPeriodsFromSnaps builds Brinson periods between consecutive snaps that carry Weights.
+// Stock returns are real close-to-close from bars (never invented). Missing bars → name omitted.
+// Benchmark = equal-weight of benchUniverseByDate[from] when present; else all names with industry + return.
+func BuildAttributionPeriodsFromSnaps(
+	snaps []types.DailySnapshot,
+	lookup map[types.SecurityID]string,
+	barsByCode map[types.SecurityID]map[string]types.Bar,
+	benchUniverseByDate map[string][]types.SecurityID,
+) []AttributionPeriod {
+	if len(snaps) < 2 || len(lookup) == 0 || len(barsByCode) == 0 {
+		return nil
+	}
+	out := make([]AttributionPeriod, 0)
+	for i := 0; i < len(snaps)-1; i++ {
+		from := snaps[i]
+		to := snaps[i+1]
+		if len(from.Weights) == 0 {
+			continue
+		}
+		fromS, toS := from.TradeDate.String(), to.TradeDate.String()
+
+		// Candidate codes: portfolio holdings ∪ bench universe ∪ (fallback later).
+		cand := map[types.SecurityID]struct{}{}
+		for code, w := range from.Weights {
+			if w != 0 {
+				cand[code] = struct{}{}
+			}
+		}
+		if univ := benchUniverseByDate[fromS]; len(univ) > 0 {
+			for _, code := range univ {
+				cand[code] = struct{}{}
+			}
+		} else {
+			for code := range barsByCode {
+				cand[code] = struct{}{}
+			}
+		}
+
+		rets := map[types.SecurityID]float64{}
+		for code := range cand {
+			bars := barsByCode[code]
+			if r, ok := closeToCloseReturn(bars, from.TradeDate, to.TradeDate); ok {
+				rets[code] = r
+			}
+		}
+		if len(rets) == 0 {
+			continue
+		}
+
+		// Portfolio industry weight and weight×return (only names with real returns for r_p).
+		portW := map[string]float64{}
+		portWRet := map[string]float64{} // sum w for names with return
+		portWR := map[string]float64{}   // sum w*r
+		for code, w := range from.Weights {
+			if w == 0 {
+				continue
+			}
+			ind := lookup[code]
+			if ind == "" {
+				ind = "UNKNOWN"
+			}
+			portW[ind] += w
+			if r, ok := rets[code]; ok {
+				portWRet[ind] += w
+				portWR[ind] += w * r
+			}
+		}
+		sumPW := 0.0
+		for _, w := range portW {
+			sumPW += w
+		}
+		if sumPW > 0 {
+			for ind := range portW {
+				portW[ind] /= sumPW
+			}
+			for ind := range portWRet {
+				portWRet[ind] /= sumPW
+				portWR[ind] /= sumPW
+			}
+		}
+
+		// Benchmark universe (equal-weight).
+		benchList := benchUniverseByDate[fromS]
+		if len(benchList) == 0 {
+			benchList = make([]types.SecurityID, 0, len(rets))
+			for code := range rets {
+				if lookup[code] != "" {
+					benchList = append(benchList, code)
+				}
+			}
+			sort.Slice(benchList, func(a, b int) bool { return benchList[a] < benchList[b] })
+		}
+		validBench := make([]types.SecurityID, 0, len(benchList))
+		for _, code := range benchList {
+			if _, ok := rets[code]; !ok {
+				continue
+			}
+			if lookup[code] == "" {
+				continue
+			}
+			validBench = append(validBench, code)
+		}
+		if len(validBench) == 0 {
+			continue
+		}
+		ew := 1.0 / float64(len(validBench))
+		benchW := map[string]float64{}
+		benchWR := map[string]float64{}
+		for _, code := range validBench {
+			ind := lookup[code]
+			benchW[ind] += ew
+			benchWR[ind] += ew * rets[code]
+		}
+
+		indSet := map[string]struct{}{}
+		for ind := range portW {
+			indSet[ind] = struct{}{}
+		}
+		for ind := range benchW {
+			indSet[ind] = struct{}{}
+		}
+		inds := make([]string, 0, len(indSet))
+		for ind := range indSet {
+			inds = append(inds, ind)
+		}
+		sort.Strings(inds)
+
+		rows := make([]IndustryPeriodReturn, 0, len(inds))
+		for _, ind := range inds {
+			pw := portW[ind]
+			bw := benchW[ind]
+			// Need a real port return when portfolio has weight in this industry.
+			var pr float64
+			if pw > 0 {
+				if portWRet[ind] <= 0 {
+					continue // refuse to invent industry return
+				}
+				pr = portWR[ind] / portWRet[ind]
+			}
+			var br float64
+			if bw > 0 {
+				br = benchWR[ind] / bw
+			}
+			rows = append(rows, IndustryPeriodReturn{
+				Industry:    ind,
+				PortWeight:  pw,
+				BenchWeight: bw,
+				PortReturn:  pr,
+				BenchReturn: br,
+			})
+		}
+		if len(rows) == 0 {
+			continue
+		}
+		out = append(out, AttributionPeriod{
+			FromDate:   fromS,
+			ToDate:     toS,
+			Industries: rows,
+		})
+	}
+	return out
+}
+
+func closeToCloseReturn(bars map[string]types.Bar, from, to types.TradeDate) (float64, bool) {
+	if bars == nil {
+		return 0, false
+	}
+	a, okA := bars[from.String()]
+	b, okB := bars[to.String()]
+	if !okA || !okB {
+		return 0, false
+	}
+	if a.Suspended || b.Suspended || a.Close <= 0 || b.Close <= 0 {
+		return 0, false
+	}
+	return b.Close/a.Close - 1.0, true
 }
 
 // ComputeFactorLayers builds quantile and long-short mean forward returns per factor.

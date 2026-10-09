@@ -286,6 +286,7 @@ func main() {
 
 	var snaps []types.DailySnapshot
 	var factorPanels []backtest.DailyFactorPanel
+	benchUnivByDate := map[string][]types.SecurityID{} // eligible universe per exec snap date (EW Brinson bench)
 	const mvLookbackCalendarDays = 10 // nearest TotalMV on or before T within this window
 	for i := startIdx; i < endIdx-1; i++ { // -1: need next day for T+1
 		t := cal[i]
@@ -322,6 +323,9 @@ func main() {
 			unbuyable[s.Security.TSCode] = s.Unbuyable
 		}
 		fmt.Fprintf(os.Stderr, "universe %s: eligible=%d of %d securities (exec=%s)\n", t, len(univ), len(secMap), execDate)
+		if len(uCodes) > 0 {
+			benchUnivByDate[execDate.String()] = append([]types.SecurityID{}, uCodes...)
+		}
 
 		rawQ := map[types.SecurityID]float64{}
 		rawV := map[types.SecurityID]float64{}
@@ -441,7 +445,16 @@ func main() {
 	if len(factorPanels) > 0 {
 		extras.FactorPanels = factorPanels
 	}
-	// AttributionPeriods / LlmCounters remain unset until those inputs exist — honest N/A.
+	if len(extras.IndustryLookup) > 0 && len(barsByCode) > 0 {
+		extras.AttributionPeriods = backtest.BuildAttributionPeriodsFromSnaps(
+			snaps, extras.IndustryLookup, barsByCode, benchUnivByDate)
+		if len(extras.AttributionPeriods) == 0 {
+			fmt.Fprintf(os.Stderr, "brinson: no AttributionPeriods built (need consecutive Weights snaps + real close-to-close returns)\n")
+		} else {
+			fmt.Fprintf(os.Stderr, "brinson: built %d AttributionPeriod(s) (EW-universe industry proxy)\n", len(extras.AttributionPeriods))
+		}
+	}
+	// LlmCounters remain unset until LLM path wires counters — honest N/A.
 	report, err := backtest.BuildReportWithExtras(cfg, snaps, state.Fills, bench, extras)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "report: %v\n", err)

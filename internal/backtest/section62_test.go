@@ -126,10 +126,14 @@ func TestBrinsonSkeleton(t *testing.T) {
 	if empty.Method == "" {
 		t.Fatal("method must be documented even when N/A")
 	}
-	periods := [][]backtest.IndustryPeriodReturn{
+	periods := []backtest.AttributionPeriod{
 		{
-			{Industry: "X", PortWeight: 0.6, BenchWeight: 0.5, PortReturn: 0.02, BenchReturn: 0.01},
-			{Industry: "Y", PortWeight: 0.4, BenchWeight: 0.5, PortReturn: -0.01, BenchReturn: 0.00},
+			FromDate: "2024-01-02",
+			ToDate:   "2024-01-03",
+			Industries: []backtest.IndustryPeriodReturn{
+				{Industry: "X", PortWeight: 0.6, BenchWeight: 0.5, PortReturn: 0.02, BenchReturn: 0.01},
+				{Industry: "Y", PortWeight: 0.4, BenchWeight: 0.5, PortReturn: -0.01, BenchReturn: 0.00},
+			},
 		},
 	}
 	got := backtest.ComputeBrinsonAttribution(periods)
@@ -147,6 +151,103 @@ func TestBrinsonSkeleton(t *testing.T) {
 	}
 	if !backtest.NearlyEqualDefault(got.Interaction.Value, 0.002) {
 		t.Fatalf("inter %v", got.Interaction.Value)
+	}
+}
+
+func TestBuildAttributionPeriodsFromSnaps(t *testing.T) {
+	d0, _ := types.ParseTradeDate("2024-01-02")
+	d1, _ := types.ParseTradeDate("2024-01-03")
+	snaps := []types.DailySnapshot{
+		snapFull("2024-01-02", 100,
+			map[types.SecurityID]float64{"A": 1, "B": 1},
+			map[types.SecurityID]float64{"A": 0.6, "B": 0.4}, 0, 0),
+		snapFull("2024-01-03", 101,
+			map[types.SecurityID]float64{"A": 1, "B": 1},
+			map[types.SecurityID]float64{"A": 0.6, "B": 0.4}, 0, 0),
+	}
+	lookup := map[types.SecurityID]string{"A": "BANK", "B": "TECH", "C": "BANK", "D": "TECH"}
+	bars := map[types.SecurityID]map[string]types.Bar{
+		"A": {d0.String(): {TradeDate: d0, Close: 10}, d1.String(): {TradeDate: d1, Close: 11}}, // +10%
+		"B": {d0.String(): {TradeDate: d0, Close: 20}, d1.String(): {TradeDate: d1, Close: 20}}, // 0%
+		"C": {d0.String(): {TradeDate: d0, Close: 30}, d1.String(): {TradeDate: d1, Close: 33}}, // +10%
+		"D": {d0.String(): {TradeDate: d0, Close: 40}, d1.String(): {TradeDate: d1, Close: 36}}, // -10%
+	}
+	benchUniv := map[string][]types.SecurityID{
+		"2024-01-02": {"A", "B", "C", "D"},
+	}
+	// Missing inputs → nil
+	if got := backtest.BuildAttributionPeriodsFromSnaps(snaps, nil, bars, benchUniv); got != nil {
+		t.Fatal("nil lookup → nil periods")
+	}
+	periods := backtest.BuildAttributionPeriodsFromSnaps(snaps, lookup, bars, benchUniv)
+	if len(periods) != 1 {
+		t.Fatalf("want 1 period, got %d", len(periods))
+	}
+	attr := backtest.ComputeBrinsonAttribution(periods)
+	if !attr.Available {
+		t.Fatalf("expected Available: %+v", attr)
+	}
+	// Bench EW: BANK={A,C} w=0.5, TECH={B,D} w=0.5
+	// r_b BANK = (0.1+0.1)/2 = 0.1; TECH = (0-0.1)/2 = -0.05
+	// Port: BANK w=0.6 r=0.1; TECH w=0.4 r=0
+	byInd := map[string]backtest.IndustryPeriodReturn{}
+	for _, row := range periods[0].Industries {
+		byInd[row.Industry] = row
+	}
+	if !backtest.NearlyEqualDefault(byInd["BANK"].PortWeight, 0.6) || !backtest.NearlyEqualDefault(byInd["BANK"].BenchWeight, 0.5) {
+		t.Fatalf("BANK weights %+v", byInd["BANK"])
+	}
+	if !backtest.NearlyEqualDefault(byInd["BANK"].PortReturn, 0.1) || !backtest.NearlyEqualDefault(byInd["BANK"].BenchReturn, 0.1) {
+		t.Fatalf("BANK returns %+v", byInd["BANK"])
+	}
+	if !backtest.NearlyEqualDefault(byInd["TECH"].PortReturn, 0.0) || !backtest.NearlyEqualDefault(byInd["TECH"].BenchReturn, -0.05) {
+		t.Fatalf("TECH returns %+v", byInd["TECH"])
+	}
+
+	// Segment filter: outside range → empty → N/A
+	outSnaps := []types.DailySnapshot{snap("2025-01-02", 100), snap("2025-01-03", 100)}
+	filtered := backtest.FilterAttributionPeriods(periods, outSnaps)
+	if len(filtered) != 0 {
+		t.Fatal("filter should drop out-of-range periods")
+	}
+	if backtest.ComputeBrinsonAttribution(filtered).Available {
+		t.Fatal("filtered empty → N/A")
+	}
+}
+
+func TestBuildReportBrinsonAvailableWhenPeriodsWired(t *testing.T) {
+	d0, _ := types.ParseTradeDate("2024-01-02")
+	d1, _ := types.ParseTradeDate("2024-01-03")
+	snaps := []types.DailySnapshot{
+		snapFull("2024-01-02", 100,
+			map[types.SecurityID]float64{"A": 1, "B": 1},
+			map[types.SecurityID]float64{"A": 0.5, "B": 0.5}, 0, 0),
+		snapFull("2024-01-03", 101,
+			map[types.SecurityID]float64{"A": 1, "B": 1},
+			map[types.SecurityID]float64{"A": 0.5, "B": 0.5}, 0, 0),
+	}
+	lookup := map[types.SecurityID]string{"A": "X", "B": "Y"}
+	bars := map[types.SecurityID]map[string]types.Bar{
+		"A": {d0.String(): {Close: 10}, d1.String(): {Close: 11}},
+		"B": {d0.String(): {Close: 10}, d1.String(): {Close: 10}},
+	}
+	periods := backtest.BuildAttributionPeriodsFromSnaps(snaps, lookup, bars, map[string][]types.SecurityID{
+		"2024-01-02": {"A", "B"},
+	})
+	cfg := testCfgWithSplit("2024-01-01", "2024-12-31", "2024-06-30", "2024-09-30")
+	r, err := backtest.BuildReportWithExtras(cfg, snaps, nil, nil, backtest.ReportExtras{
+		IndustryLookup:     lookup,
+		AttributionPeriods: periods,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	full := r.Segments["full"]
+	if !full.Attribution.Available {
+		t.Fatalf("report attribution should be available: %+v", full.Attribution)
+	}
+	if !full.Metrics.BrinsonAttribution.Available {
+		t.Fatalf("metrics brinson flag: %+v", full.Metrics.BrinsonAttribution)
 	}
 }
 

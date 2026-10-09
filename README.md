@@ -146,7 +146,7 @@ CLI may print a **fixture demo** total return for the formal segment — that va
 | Industry distribution time series | **Implemented when** `ReportExtras.IndustryLookup` + snap `Weights` present (CLI wires SW_L1 lookup from industry records); else N/A |
 | Factor exposure time series | **Implemented when** CLI persists `DailyFactorPanel` + snap `Weights` (wired in `cmd/backtest`); else N/A |
 | Limit/suspend unfilled skip rate | **Implemented when** engine `SkipCounts` has intended orders > 0 (ApplyTargets tallies limit/suspend skips); else N/A |
-| Brinson / simple attribution | **Skeleton**: method documented in report; computes Allocation/Selection/Interaction when `AttributionPeriods` provided; else N/A |
+| Brinson / simple attribution | **Implemented when** CLI builds `AttributionPeriods` from snap `Weights` + `IndustryLookup` + real close-to-close bars (EW eligible-universe industry proxy for benchmark; IndexBars lack industry breakdown); else N/A with method note |
 | Factor long-short / layer returns | **Implemented when** panels include real `ForwardRet` (CLI attaches T→T+1 close/close when bars exist); else N/A (never invents) |
 | Walk-forward multi-window execution | Skeleton config / note only — no fake multi-window runs |
 | LLM coverage / degrade stats | N/A until LLM path enabled **with counters** (`LlmRunCounters`); schema ready |
