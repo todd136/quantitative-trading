@@ -12,6 +12,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -25,11 +26,12 @@ import (
 
 // Config controls how the adapter reaches AKShare.
 type Config struct {
-	PythonBin   string // default "python3"
-	HelperPath  string // path to scripts/akshare_fetch.py
-	HTTPBase    string // optional sidecar base URL (reserved; CLI/cache preferred)
-	SkipNetwork bool   // when true, never exec helper; cache-only or ErrSkipped
-	CacheDir    string // optional directory of JSON blobs from prior fetches
+	PythonBin   string        // default "python3"
+	HelperPath  string        // path to scripts/akshare_fetch.py
+	HTTPBase    string        // optional sidecar base URL (reserved; CLI/cache preferred)
+	SkipNetwork bool          // when true, never exec helper; cache-only or ErrSkipped
+	CacheDir    string        // optional directory of JSON blobs from prior fetches
+	CLITimeout  time.Duration // per helper subprocess; 0 => default 90s (prevents hung mv/financials/bars)
 }
 
 // Provider implements data.Provider using helper CLI and/or CacheDir.
@@ -43,6 +45,9 @@ var _ data.Provider = (*Provider)(nil)
 func New(cfg Config) *Provider {
 	if cfg.PythonBin == "" {
 		cfg.PythonBin = "python3"
+	}
+	if cfg.CLITimeout <= 0 {
+		cfg.CLITimeout = 90 * time.Second
 	}
 	return &Provider{cfg: cfg}
 }
@@ -59,6 +64,16 @@ func (p *Provider) fetchViaCLI(ctx context.Context, args ...string) ([]byte, err
 	if p.cfg.HelperPath == "" {
 		return nil, fmt.Errorf("%w: HelperPath not configured", ErrHelperFailed)
 	}
+	// Bound each helper invocation so a hung mv/financials/bars call cannot stall forever.
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		timeout := p.cfg.CLITimeout
+		if timeout <= 0 {
+			timeout = 90 * time.Second
+		}
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
 	cmdArgs := append([]string{p.cfg.HelperPath}, args...)
 	cmd := exec.CommandContext(ctx, p.cfg.PythonBin, cmdArgs...)
 	var stdout, stderr bytes.Buffer
@@ -68,6 +83,16 @@ func (p *Provider) fetchViaCLI(ctx context.Context, args ...string) ([]byte, err
 	out := stdout.Bytes()
 	errText := strings.TrimSpace(stderr.String())
 	if err != nil {
+		// CommandContext often surfaces "signal: killed"; prefer ctx deadline for the note.
+		timedOut := errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded)
+		if timedOut {
+			timeout := p.cfg.CLITimeout
+			if timeout <= 0 {
+				timeout = 90 * time.Second
+			}
+			fmt.Fprintf(os.Stderr, "akshare helper timeout after %s (skip/empty this call, no fake zeros) args=%v\n", timeout, args)
+			return out, wrapHelper(err, fmt.Sprintf("CLI timeout (%s) args=%v", timeout, args))
+		}
 		msg := errText
 		if msg == "" {
 			msg = string(out)
@@ -451,7 +476,7 @@ func (p *Provider) Industry() ([]types.IndustryRecord, error) {
 		}
 		src := r.Source
 		if src == "" {
-			src = "EM_INDUSTRY"
+			src = "SW_L1"
 		}
 		out = append(out, types.IndustryRecord{
 			TSCode:        types.SecurityID(r.TSCode),
@@ -530,14 +555,11 @@ func (p *Provider) Financials(tsCode types.SecurityID) ([]types.FinancialRow, er
 // MarketValues implements data.Provider (best-effort snapshot / series).
 // Entries with TotalMV<=0 are dropped — missing MV is not a valid zero.
 func (p *Provider) MarketValues(tsCode types.SecurityID, from, to types.TradeDate) ([]types.MarketValue, error) {
+	// Cache key is symbol-only. Fetch full MV history once (helper ignores window for
+	// stock_value_em); filter to [from,to] here. Passing T,T into the helper would
+	// poison the cache with a single day and break later signal dates.
 	key := "mv_" + string(tsCode)
 	args := []string{"mv", "--symbol", string(tsCode)}
-	if !from.Time().IsZero() {
-		args = append(args, "--start", from.String())
-	}
-	if !to.Time().IsZero() {
-		args = append(args, "--end", to.String())
-	}
 	raw, err := p.loadJSON(context.Background(), key, args...)
 	if err != nil {
 		return nil, err

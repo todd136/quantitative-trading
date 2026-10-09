@@ -308,15 +308,12 @@ func main() {
 				if q, ok := factors.RawQuality(fin); ok {
 					rawQ[code] = q
 				}
+				// Require real TotalMV for T; never invent MV from Close*constant.
 				mvList, _ := prov.MarketValues(code, t, t)
-				tmv := 0.0
 				if len(mvList) > 0 {
-					tmv = mvList[0].TotalMV
-				} else if b, ok := barsByCode[code][t.String()]; ok {
-					tmv = b.Close * 1e9
-				}
-				if v, ok := factors.RawValue(fin, tmv); ok {
-					rawV[code] = v
+					if v, ok := factors.RawValue(fin, mvList[0].TotalMV); ok {
+						rawV[code] = v
+					}
 				}
 			}
 			if m, ok := factors.RawMomentum(barLists[code], t, 252, 21); ok {

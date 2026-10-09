@@ -4,7 +4,9 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"quantitative-trading/internal/data/akshare"
 	"quantitative-trading/internal/types"
@@ -206,5 +208,32 @@ func TestFetchAndCache(t *testing.T) {
 	cal, err := p2.LoadCalendar()
 	if err != nil || len(cal) != 3 {
 		t.Fatalf("cached load: %v len=%d", err, len(cal))
+	}
+}
+
+func TestCLITimeout(t *testing.T) {
+	helper, err := filepath.Abs(filepath.Join("testdata", "slow_helper.py"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := akshare.New(akshare.Config{
+		PythonBin:  "python3",
+		HelperPath: helper,
+		CLITimeout: 1 * time.Second,
+	})
+	start := time.Now()
+	_, err = p.FetchViaCLI("mv", "--symbol", "300445.SZ")
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("want timeout error")
+	}
+	if !errors.Is(err, akshare.ErrHelperFailed) {
+		t.Fatalf("want ErrHelperFailed, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "CLI timeout") {
+		t.Fatalf("want CLI timeout in msg, got %v", err)
+	}
+	if elapsed > 5*time.Second {
+		t.Fatalf("timeout took too long: %s", elapsed)
 	}
 }

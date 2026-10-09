@@ -1,0 +1,94 @@
+# Formal short-window AKShare smoke — v1.2 formal rules (no TEMP DEGRADE).
+# Purpose: verify industry_neutral + require_all work end-to-end with live AKShare
+# once SW_L1 industry membership is populated (scripts/akshare_fetch.py industry).
+# Diffs vs configs/akshare_short_smoke.yaml: formal flags restored.
+# Diffs vs configs/example.yaml: akshare provider, short calendar, max_symbols, .venv.
+# Keep configs/example.yaml on v1.2 formal defaults (fixture + SW_L1). Not investment advice.
+version: "v1.2-20260928"
+market:
+  boards: ["SSE_MAIN", "SZSE_MAIN", "CHINEXT", "STAR"]   # 含科创板；不含 BSE（北交所）
+  exclude_st: true
+  require_star_eligibility: false
+universe:
+  min_list_trading_days: 60
+  min_adv_20: 20000000
+  min_adv_valid_days: 15
+factors:
+  quality:  {enabled: true, weight: 1.0}
+  value:    {enabled: true, weight: 1.0}
+  momentum: {enabled: true, weight: 1.0}
+  require_all: true   # formal — all enabled factors must be present
+processing:
+  winsorize: {method: "MAD", n: 5}
+  industry_neutral: true   # formal — requires non-empty SW_L1 membership
+  industry_source: "SW_L1"  # matches helper SW_L1 emit (example.yaml default)
+  zscore: true
+portfolio:
+  N: 50
+  weight: "equal"
+  industry_cap_ratio: 0.15
+  rebalance_freq: "daily"
+  rebalance_weekday: 2
+signal:
+  signal_price: "close"
+  exec_price: "open"
+costs:
+  commission_bps: 3
+  stamp_tax_bps: 5
+  slippage_bps: 5
+execution:
+  rolling_unfilled: true
+  volume_constraint_enabled: false
+  buy_limit_handler: "renormalize"
+  lot_size: 100
+backtest:
+  benchmark: "000300.SH"
+  risk_free: 0.0
+  initial_cash: 100000000
+  float_tol:
+    rel: 1.0e-9
+    abs: 1.0e-12
+  # Same short calendar as configs/akshare_short.yaml.
+  start_date: "2024-01-02"
+  end_date: "2024-01-31"
+  sample_split:
+    train_end: "2024-01-10"
+    val_end: "2024-01-19"
+    # OOS = (val_end, end_date]
+data:
+  provider: "akshare"          # fixture | akshare
+  fixture_dir: "testdata/fixtures"
+  akshare_python: ".venv/bin/python"
+  akshare_helper: "scripts/akshare_fetch.py"
+  akshare_cache_dir: "testdata/akshare_cache"
+  # First formal smoke: capped universe (40–100). Production uses date-window only.
+  max_symbols: 60
+llm:
+  enabled: false
+  weight: 0.0
+  score_pipeline: "zscore_only"
+  attach_point: "post_universe"
+  apply_to_holdings: false
+  filter:
+    enabled: false
+    min_confidence: 0.5
+    block_tags: []
+  model:
+    model_id: ""
+    prompt_version: "llm_prompt_v1"
+    temperature: 0.0
+    seed: 0
+    timeout_ms: 8000
+    max_retries: 0
+  cache:
+    enabled: true
+    key_fields: ["model_id", "prompt_version", "signal_date", "ts_code", "source_ids_hash"]
+  text:
+    timezone: "Asia/Shanghai"
+    require_asof_leq_signal: true
+    on_missing: "degrade_to_three_factor"
+  audit:
+    log_raw_text: false
+    log_prompt_full: false
+    log_structured_summary: true
+    compliance_notice: "non_investment_advice"

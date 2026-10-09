@@ -16,7 +16,7 @@ factors:
 processing:
   winsorize: {method: "MAD", n: 5}
   industry_neutral: true
-  industry_source: "EM_INDUSTRY"  # AKShare helper emits EM_INDUSTRY (not SW_L1)
+  industry_source: "SW_L1"  # AKShare helper prefers SW_L1 (EM often RemoteDisconnect)
   zscore: true
 portfolio:
   N: 50

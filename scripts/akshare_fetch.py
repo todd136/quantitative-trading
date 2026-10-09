@@ -50,6 +50,7 @@ _RETRY_MARKERS = (
     "Max retries exceeded",
     "EOF occurred",
     "Broken pipe",
+    "No tables found",  # sw_index_third_cons transient empty parse
 )
 
 
@@ -637,59 +638,232 @@ def cmd_suspend(args: argparse.Namespace) -> int:
 
 
 def cmd_industry(args: argparse.Namespace) -> int:
-    """Best-effort EM industry membership. Never fabricates industries.
+    """Industry membership for industry_neutral scoring. Never fabricates industries.
 
-    Gaps: Eastmoney board APIs frequently RemoteDisconnect; historical
-    effective/expire dates are unavailable (we stamp effective_date=2000-01-01).
-    Source label is EM_INDUSTRY (not SW_L1).
+    Preferred: Shenwan L1 via sw_index_first_info + sw_index_third_cons (label SW_L1).
+    Per-board fallback: index_stock_cons(bare L1 code) when SW cons returns empty tables.
+    Last resort: Eastmoney industry boards (label EM_INDUSTRY; often RemoteDisconnect).
+    Gaps: full historical classify file (stock_industry_clf_hist_sw) often SSL-fails;
+    effective_date uses 纳入日期 when present else stamped 2000-01-01.
     """
     ak = _import_ak()
     records: list[dict] = []
     note_parts: list[str] = []
     source = ""
-    failed_boards = 0
-    ok_boards = 0
+    limit = int(getattr(args, "limit", 0) or 0)
+
+    def _emit_empty(note: str, src: str = "none") -> int:
+        print(note, file=sys.stderr)
+        _emit({"records": [], "note": note, "source": src}, args.out)
+        return 0
+
+    def _ingest_cons(seen: dict, cons, *, ind_code: str, bname: str, stock_cols: tuple, date_cols: tuple) -> int:
+        stock_c = _col(cons, *stock_cols)
+        if not stock_c:
+            return 0
+        date_c = _col(cons, *date_cols) if date_cols else None
+        n = 0
+        for _, row in cons.iterrows():
+            ts = _to_ts_code(str(row[stock_c]))
+            if not ts:
+                continue
+            eff = "2000-01-01"
+            if date_c is not None:
+                d = _ymd_dash(row[date_c])
+                if d:
+                    eff = d
+            seen[ts] = {
+                "ts_code": ts,
+                "industry_code": ind_code,
+                "industry_name": bname,
+                "effective_date": eff,
+                "expire_date": None,
+                "source": "SW_L1",
+            }
+            n += 1
+        return n
+
+    def _fetch_l1_cons(bcode: str):
+        """Return (dataframe, via_label) or raise."""
+        bare = bcode.replace(".SI", "").strip()
+        cons_fn = getattr(ak, "sw_index_third_cons", None)
+        idx_fn = getattr(ak, "index_stock_cons", None)
+        last_err: Optional[BaseException] = None
+        if callable(cons_fn):
+            try:
+                cons = _with_retry(
+                    lambda c=bcode: cons_fn(symbol=c),
+                    tries=3,
+                    base_delay=1.2,
+                    label=f"sw_l1_cons({bcode})",
+                )
+                if cons is not None and not getattr(cons, "empty", True) and _col(cons, "股票代码", "代码", "code"):
+                    return cons, "sw_index_third_cons"
+            except Exception as e:  # noqa: BLE001
+                last_err = e
+        if callable(idx_fn):
+            try:
+                cons = _with_retry(
+                    lambda c=bare: idx_fn(symbol=c),
+                    tries=3,
+                    base_delay=1.0,
+                    label=f"index_stock_cons({bare})",
+                )
+                if cons is not None and not getattr(cons, "empty", True) and _col(cons, "品种代码", "股票代码", "代码", "code"):
+                    return cons, "index_stock_cons"
+            except Exception as e:  # noqa: BLE001
+                last_err = e
+        if last_err is not None:
+            raise last_err
+        raise RuntimeError(f"no constituents for {bcode}")
+
+    # --- Path A: Shenwan L1 (matches configs/example.yaml industry_source=SW_L1) ---
+    try:
+        first_fn = getattr(ak, "sw_index_first_info", None)
+        if callable(first_fn):
+            try:
+                boards = _with_retry(first_fn, tries=4, base_delay=1.5, label="sw_l1_boards")
+            except Exception as e:  # noqa: BLE001
+                note_parts.append(f"sw_index_first_info: {e}")
+                boards = None
+            if boards is not None and not getattr(boards, "empty", True):
+                code_c = _col(boards, "行业代码", "code")
+                name_c = _col(boards, "行业名称", "name")
+                if not code_c or not name_c:
+                    note_parts.append(f"sw_l1 columns unexpected: {list(boards.columns)}")
+                else:
+                    pairs = [
+                        (str(r[code_c]).strip(), str(r[name_c]).strip())
+                        for _, r in boards.iterrows()
+                        if str(r[code_c]).strip() and str(r[name_c]).strip()
+                    ]
+                    if limit > 0:
+                        pairs = pairs[:limit]
+                    seen: dict[str, dict] = {}
+                    ok_boards = 0
+                    failed_boards = 0
+                    via_counts: dict[str, int] = {}
+                    for i, (bcode, bname) in enumerate(pairs):
+                        ind_code = bcode.replace(".SI", "").strip()
+                        try:
+                            cons, via = _fetch_l1_cons(bcode)
+                            n = _ingest_cons(
+                                seen,
+                                cons,
+                                ind_code=ind_code,
+                                bname=bname,
+                                stock_cols=("股票代码", "品种代码", "代码", "code"),
+                                date_cols=("纳入日期", "纳入时间", "date"),
+                            )
+                            if n <= 0:
+                                failed_boards += 1
+                                print(f"sw_l1 cons empty {bcode}/{bname}", file=sys.stderr)
+                            else:
+                                ok_boards += 1
+                                via_counts[via] = via_counts.get(via, 0) + 1
+                        except Exception as e:  # noqa: BLE001
+                            failed_boards += 1
+                            print(f"sw_l1 cons fail {bcode}/{bname}: {e}", file=sys.stderr)
+                            time.sleep(0.4)
+                        if (i + 1) % 3 == 0:
+                            time.sleep(0.35)
+                    # Second pass for still-missing L1 boards
+                    fetched_codes = {r["industry_code"] for r in seen.values()}
+                    retry_pairs = [
+                        (bcode, bname)
+                        for bcode, bname in pairs
+                        if bcode.replace(".SI", "").strip() not in fetched_codes
+                    ]
+                    if retry_pairs:
+                        time.sleep(1.5)
+                        for bcode, bname in retry_pairs:
+                            ind_code = bcode.replace(".SI", "").strip()
+                            try:
+                                cons, via = _fetch_l1_cons(bcode)
+                                n = _ingest_cons(
+                                    seen,
+                                    cons,
+                                    ind_code=ind_code,
+                                    bname=bname,
+                                    stock_cols=("股票代码", "品种代码", "代码", "code"),
+                                    date_cols=("纳入日期", "纳入时间", "date"),
+                                )
+                                if n > 0:
+                                    ok_boards += 1
+                                    failed_boards = max(0, failed_boards - 1)
+                                    via_counts[via] = via_counts.get(via, 0) + 1
+                            except Exception as e:  # noqa: BLE001
+                                print(f"sw_l1 cons retry fail {bcode}/{bname}: {e}", file=sys.stderr)
+                                time.sleep(0.6)
+                            time.sleep(0.45)
+                        note_parts.append(f"sw_l1_retry attempted={len(retry_pairs)}")
+
+                    records = list(seen.values())
+                    source = "sw_index_third_cons+index_stock_cons(SW_L1)"
+                    if via_counts:
+                        note_parts.append(
+                            "via=" + ",".join(f"{k}:{v}" for k, v in sorted(via_counts.items()))
+                        )
+                    if failed_boards:
+                        note_parts.append(
+                            f"sw_l1 boards_ok={ok_boards} boards_failed={failed_boards}"
+                        )
+                    if records:
+                        with_pit = sum(1 for r in records if r["effective_date"] != "2000-01-01")
+                        note_parts.append(
+                            f"SW_L1 mapped {len(records)} names from {ok_boards}/{len(pairs)} "
+                            f"L1 industries; effective_date from 纳入日期 for {with_pit} "
+                            f"(else stamped 2000-01-01)"
+                        )
+                        note = "; ".join(note_parts)
+                        print(f"industry: {note}", file=sys.stderr)
+                        _emit({"records": records, "note": note, "source": source}, args.out)
+                        return 0
+                    note_parts.append("sw_l1 cons returned empty")
+        else:
+            note_parts.append("sw_index_first_info not in this akshare")
+    except SystemExit:
+        raise
+    except Exception as e:  # noqa: BLE001
+        note_parts.append(f"sw_l1 path: {e}")
+
+    # --- Path C: Eastmoney industry boards (often RemoteDisconnect) ---
     try:
         fn = getattr(ak, "stock_board_industry_name_em", None)
         detail = getattr(ak, "stock_board_industry_cons_em", None)
         if not (callable(fn) and callable(detail)):
-            note_parts.append("industry board APIs not found in this akshare version")
-            _emit({"records": [], "note": "; ".join(note_parts), "source": "none"}, args.out)
-            return 0
+            note_parts.append("EM industry board APIs not found in this akshare version")
+            return _emit_empty("; ".join(note_parts))
 
-        source = "stock_board_industry_cons_em"
         try:
-            boards = _with_retry(fn, tries=4, base_delay=1.5, label="industry_boards")
+            boards = _with_retry(fn, tries=4, base_delay=1.5, label="industry_boards_em")
         except Exception as e:  # noqa: BLE001
-            note = f"industry board list unavailable: {e}"
-            print(note, file=sys.stderr)
-            _emit({"records": [], "note": note, "source": "none"}, args.out)
-            return 0
+            note_parts.append(f"EM industry board list unavailable: {e}")
+            return _emit_empty("; ".join(note_parts))
 
         name_c = _col(boards, "板块名称", "name")
         if not name_c:
-            note = f"industry board columns unexpected: {list(boards.columns)}"
-            print(note, file=sys.stderr)
-            _emit({"records": [], "note": note, "source": "none"}, args.out)
-            return 0
+            note_parts.append(f"EM industry board columns unexpected: {list(boards.columns)}")
+            return _emit_empty("; ".join(note_parts))
 
-        limit = int(getattr(args, "limit", 0) or 0)
         names = [str(x) for x in boards[name_c].tolist() if str(x).strip()]
         if limit > 0:
             names = names[:limit]
 
-        seen: dict[str, dict] = {}
+        seen = {}
+        failed_boards = 0
+        ok_boards = 0
         for i, bname in enumerate(names):
             try:
                 cons = _with_retry(
                     lambda b=bname: detail(symbol=b),
                     tries=4,
                     base_delay=1.0,
-                    label=f"industry_cons({bname})",
+                    label=f"industry_cons_em({bname})",
                 )
             except Exception as e:  # noqa: BLE001
                 failed_boards += 1
-                print(f"industry cons fail {bname}: {e}", file=sys.stderr)
+                print(f"EM industry cons fail {bname}: {e}", file=sys.stderr)
                 time.sleep(0.4)
                 continue
             code_c = _col(cons, "代码", "code")
@@ -701,7 +875,6 @@ def cmd_industry(args: argparse.Namespace) -> int:
                 ts = _to_ts_code(str(row[code_c]))
                 if not ts:
                     continue
-                # Last board wins if a name appears in multiple EM boards.
                 seen[ts] = {
                     "ts_code": ts,
                     "industry_code": bname,
@@ -710,18 +883,18 @@ def cmd_industry(args: argparse.Namespace) -> int:
                     "expire_date": None,
                     "source": "EM_INDUSTRY",
                 }
-            # gentle pacing — Eastmoney disconnects under burst traffic
             if (i + 1) % 5 == 0:
                 time.sleep(0.35)
 
         records = list(seen.values())
+        source = "stock_board_industry_cons_em"
         if failed_boards:
-            note_parts.append(f"boards_ok={ok_boards} boards_failed={failed_boards}")
+            note_parts.append(f"EM boards_ok={ok_boards} boards_failed={failed_boards}")
         if not records:
-            note_parts.append("industry fetch returned empty")
+            note_parts.append("industry fetch returned empty (SW_L1/THS/EM all failed)")
         else:
             note_parts.append(
-                f"mapped {len(records)} names from {ok_boards} boards; "
+                f"EM mapped {len(records)} names from {ok_boards} boards; "
                 "effective_date stamped 2000-01-01 (no historical membership API)"
             )
         note = "; ".join(note_parts)
@@ -732,7 +905,8 @@ def cmd_industry(args: argparse.Namespace) -> int:
         raise
     except Exception as e:
         print(f"industry warning: {e}", file=sys.stderr)
-        _emit({"records": [], "note": f"industry unavailable: {e}", "source": "none"}, args.out)
+        note_parts.append(f"industry unavailable: {e}")
+        _emit({"records": [], "note": "; ".join(note_parts), "source": "none"}, args.out)
         return 0
 
 
@@ -1068,6 +1242,9 @@ def cmd_mv(args: argparse.Namespace) -> int:
     end = (args.end or "").strip()
     try:
         # --- Path A: stock_value_em daily history ---
+        # Return FULL history (do not window-filter here). Go caches by symbol only and
+        # filters client-side; windowing here would poison the cache with a single day
+        # when MarketValues(code, T, T) is called repeatedly.
         fn = getattr(ak, "stock_value_em", None)
         if callable(fn):
             try:
@@ -1079,15 +1256,19 @@ def cmd_mv(args: argparse.Namespace) -> int:
                 fsh_c = _col(df, "流通股本", "float_share")
                 if date_c and tmv_c:
                     source = "stock_value_em"
+                    in_window = 0
                     for _, row in df.iterrows():
                         d = _ymd_dash(row[date_c])
-                        if start and d and d < start:
-                            continue
-                        if end and d and d > end:
-                            continue
                         tmv = _f_opt(row[tmv_c])
                         if tmv is None or tmv <= 0:
                             continue  # never emit invalid zero MV
+                        if start and d and d < start:
+                            pass
+                        elif end and d and d > end:
+                            pass
+                        else:
+                            if start or end:
+                                in_window += 1
                         values.append(
                             {
                                 "trade_date": d,
@@ -1097,6 +1278,16 @@ def cmd_mv(args: argparse.Namespace) -> int:
                                 "total_mv": float(tmv),
                                 "float_mv": float(_f_opt(row[fmv_c]) or 0.0) if fmv_c else 0.0,
                             }
+                        )
+                    if values:
+                        note_parts.append(
+                            f"stock_value_em full_history={len(values)}"
+                            + (f" in_requested_window={in_window}" if (start or end) else "")
+                        )
+                    if values and (start or end) and in_window == 0:
+                        note_parts.append(
+                            "stock_value_em had rows but none in requested window; "
+                            "keeping full history for cache (Go filters)"
                         )
                 else:
                     note_parts.append(f"stock_value_em columns unexpected: {list(df.columns)}")

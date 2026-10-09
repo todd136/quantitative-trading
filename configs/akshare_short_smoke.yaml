@@ -25,7 +25,7 @@ factors:
 processing:
   winsorize: {method: "MAD", n: 5}
   industry_neutral: false   # SMOKE ONLY — production uses true; industry fetch often empty
-  industry_source: "EM_INDUSTRY"  # AKShare helper emits EM_INDUSTRY (not SW_L1)
+  industry_source: "SW_L1"  # formal source; smoke keeps industry_neutral=false
   zscore: true
 portfolio:
   N: 50
