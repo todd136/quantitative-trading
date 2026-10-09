@@ -484,7 +484,7 @@ func ComputeFactorLayers(panels []DailyFactorPanel, nQ int) []FactorLayerResult 
 // ComputeUnfilledSkipRate derives skip rate from engine counters when present.
 func ComputeUnfilledSkipRate(c *ExecutionSkipCounts) OptionalFloat {
 	if c == nil {
-		return na("涨跌停/停牌未成交 skip rate N/A: engine does not yet expose limit/suspend skip counts (ApplyTargets continues without tallying intended vs skipped orders)")
+		return na("涨跌停/停牌未成交 skip rate N/A: ExecutionSkipCounts not provided to report (CLI should pass Engine.SkipCounts after ApplyTargets)")
 	}
 	intended := c.IntendedBuyOrders + c.IntendedSellOrders
 	if intended <= 0 {

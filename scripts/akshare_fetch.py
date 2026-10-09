@@ -145,6 +145,15 @@ def _board_of(ts_code: str) -> Optional[str]:
     return None
 
 
+def _limit_pct(board: Optional[str], is_st: bool = False) -> float:
+    """Conventional A-share daily limit ratio when vendor high/low limits absent."""
+    if is_st:
+        return 0.05
+    if board in ("STAR", "CHINEXT"):
+        return 0.20
+    return 0.10
+
+
 def _ymd(s: str) -> str:
     s = s.strip().replace("-", "")
     if len(s) != 8 or not s.isdigit():
@@ -450,9 +459,16 @@ def cmd_bars(args: argparse.Namespace) -> int:
         if not all([date_c, open_c, high_c, low_c, close_c]):
             return _fail(f"bars columns unexpected: {list(df.columns)}", out=args.out)
 
+        board = _board_of(ts)
+        pct = _limit_pct(board, is_st=False)
         bars = []
         for _, row in df.iterrows():
             vol = _f(row[vol_c]) if vol_c else 0.0
+            pre = _f(row[pre_c]) if pre_c else 0.0
+            close = _f(row[close_c])
+            ref = pre if pre > 0 else close
+            hi_lim = ref * (1.0 + pct) if ref > 0 else 0.0
+            lo_lim = ref * (1.0 - pct) if ref > 0 else 0.0
             bars.append(
                 {
                     "trade_date": _ymd_dash(row[date_c]),
@@ -460,15 +476,22 @@ def cmd_bars(args: argparse.Namespace) -> int:
                     "open": _f(row[open_c]),
                     "high": _f(row[high_c]),
                     "low": _f(row[low_c]),
-                    "close": _f(row[close_c]),
+                    "close": close,
                     "volume": vol,
                     "amount": _f(row[amt_c]) if amt_c else 0.0,
-                    "pre_close": _f(row[pre_c]) if pre_c else 0.0,
+                    "pre_close": pre,
+                    "high_limit": hi_lim,
+                    "low_limit": lo_lim,
                     "adj_factor": 1.0,
                     "suspended": vol == 0.0,
+                    "limit_status": "",
                 }
             )
-        _emit({"symbol": ts, "bars": bars, "source": source}, args.out)
+        note = (
+            f"high/low_limit from pre_close×(1±{pct:.0%}) board={board or 'unknown'} "
+            "(AKShare daily hist lacks official limit prices; not inventing fills)"
+        )
+        _emit({"symbol": ts, "bars": bars, "source": source, "note": note}, args.out)
         return 0
     except SystemExit:
         raise
@@ -617,6 +640,17 @@ def cmd_st(args: argparse.Namespace) -> int:
                 "AKShare has no stable historical ST interval API; "
                 "returned current snapshot if available, else empty"
             )
+        if records:
+            # Snapshot only — stamp conservative entry_date so historical backtests
+            # still exclude currently-ST names. Go may also rewrite; keep honest note.
+            snap_note = (
+                "ST is a current snapshot (no historical entry/remove intervals from AKShare); "
+                "entry_date stamped 1990-01-01 (conservative full-history filter for currently-ST names); "
+                "remove_date=null. Not inventing true ST intervals."
+            )
+            note = (note + "; " if note else "") + snap_note
+            for rec in records:
+                rec["entry_date"] = "1990-01-01"
         _emit({"records": records, "note": note, "source": source or "none"}, args.out)
         return 0
     except SystemExit:

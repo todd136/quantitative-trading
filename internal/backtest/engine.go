@@ -49,6 +49,8 @@ type Engine struct {
 	CalIndex map[string]int
 	// Bars[code][date] = bar
 	Bars map[types.SecurityID]map[string]types.Bar
+	// SkipCounts accumulates intended vs limit/suspend skips across ApplyTargets calls.
+	SkipCounts ExecutionSkipCounts
 }
 
 // NextTradeDate returns the next calendar day after t, or false if none.
@@ -69,6 +71,7 @@ type Result struct {
 
 // ApplyTargets executes buys/sells at execDate open toward target weights.
 // T+1: cannot sell lots bought on execDate. Limit/suspend skip per §5.3.
+// Tallies ExecutionSkipCounts on the engine for §6.2 unfilled skip rate.
 func (e *Engine) ApplyTargets(state *PortfolioState, execDate types.TradeDate, targets []types.TargetHolding, nextAvail types.TradeDate) error {
 	cfg := e.Cfg
 	lotSize := float64(cfg.Execution.LotSize)
@@ -129,9 +132,16 @@ func (e *Engine) ApplyTargets(state *PortfolioState, execDate types.TradeDate, t
 		needSell := -delta
 		sellable := state.SellableShares(code, execDate)
 		if sellable <= 0 {
-			continue // T+1 block
+			continue // T+1 block — not a limit/suspend skip
+		}
+		// Intended sell order (had sellable shares to reduce toward target).
+		e.SkipCounts.IntendedSellOrders++
+		if bar.Suspended {
+			e.SkipCounts.SkippedSuspend++
+			continue
 		}
 		if universe.CannotSellAtOpen(bar) {
+			e.SkipCounts.SkippedLimitSell++
 			continue
 		}
 		qty := math.Min(needSell, sellable)
@@ -169,9 +179,6 @@ func (e *Engine) ApplyTargets(state *PortfolioState, execDate types.TradeDate, t
 		if !ok {
 			continue
 		}
-		if universe.CannotBuyAtOpen(bar) {
-			continue
-		}
 		px := bar.Open
 		if px <= 0 {
 			continue
@@ -180,6 +187,16 @@ func (e *Engine) ApplyTargets(state *PortfolioState, execDate types.TradeDate, t
 		targetShares := math.Floor((tw*nav/px)/lotSize) * lotSize
 		delta := targetShares - curShares
 		if delta <= 0 {
+			continue
+		}
+		// Intended buy order (target weight above current).
+		e.SkipCounts.IntendedBuyOrders++
+		if bar.Suspended {
+			e.SkipCounts.SkippedSuspend++
+			continue
+		}
+		if universe.CannotBuyAtOpen(bar) {
+			e.SkipCounts.SkippedLimitBuy++
 			continue
 		}
 		qty := math.Floor(delta/lotSize) * lotSize

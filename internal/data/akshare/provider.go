@@ -388,24 +388,67 @@ func (p *Provider) Bars(tsCode types.SecurityID, from, to types.TradeDate) ([]ty
 		if code == "" {
 			code = string(tsCode)
 		}
-		out = append(out, types.Bar{
-			TradeDate: d,
-			TSCode:    types.SecurityID(code),
-			Open:      b.Open,
-			High:      b.High,
-			Low:       b.Low,
-			Close:     b.Close,
-			Volume:    b.Volume,
-			Amount:    b.Amount,
-			PreClose:  b.PreClose,
-			AdjFactor: adj,
-			Suspended: b.Suspended || b.Volume == 0,
-		})
+		bar := types.Bar{
+			TradeDate:   d,
+			TSCode:      types.SecurityID(code),
+			Open:        b.Open,
+			High:        b.High,
+			Low:         b.Low,
+			Close:       b.Close,
+			Volume:      b.Volume,
+			Amount:      b.Amount,
+			PreClose:    b.PreClose,
+			HighLimit:   b.HighLimit,
+			LowLimit:    b.LowLimit,
+			AdjFactor:   adj,
+			Suspended:   b.Suspended || b.Volume == 0,
+			LimitStatus: b.LimitStatus,
+		}
+		// When helper omits official limits, fill conventional board bands from PreClose.
+		// ST status unknown here (no date-scoped ST join); use non-ST board pct.
+		if board, ok := MapBoard(code); ok {
+			fillConventionalLimits(&bar, board, false)
+		}
+		out = append(out, bar)
 	}
 	return out, nil
 }
 
+// fillConventionalLimits sets High/LowLimit from PreClose×(1±pct) when missing.
+func fillConventionalLimits(b *types.Bar, board types.Board, isST bool) {
+	if b.HighLimit > 0 && b.LowLimit > 0 {
+		return
+	}
+	ref := b.PreClose
+	if ref <= 0 {
+		ref = b.Close
+	}
+	if ref <= 0 {
+		return
+	}
+	pct := 0.10
+	if isST {
+		pct = 0.05
+	} else {
+		switch board {
+		case types.BoardChiNext, types.BoardSTAR:
+			pct = 0.20
+		}
+	}
+	if b.HighLimit <= 0 {
+		b.HighLimit = ref * (1 + pct)
+	}
+	if b.LowLimit <= 0 {
+		b.LowLimit = ref * (1 - pct)
+	}
+}
+
 // ST implements data.Provider (best-effort snapshot; may be empty with note in helper).
+// AKShare has no stable historical ST interval API. Snapshot lists often stamp
+// entry_date as the fetch day; for historical windows that would silently miss
+// ST filters. When the helper marks a snapshot (note/source) or entry_date is
+// "today-ish", we rewrite entry_date to 1990-01-01 with an honest stderr note —
+// conservative: currently-ST names treated as ST for the full history.
 func (p *Provider) ST() ([]types.STRecord, error) {
 	raw, err := p.loadJSONRetry(context.Background(), 3, "st", "st")
 	if err != nil {
@@ -418,7 +461,18 @@ func (p *Provider) ST() ([]types.STRecord, error) {
 	if res.Error != "" {
 		return nil, wrapHelper(nil, res.Error)
 	}
+	if res.Note != "" {
+		fmt.Fprintf(os.Stderr, "akshare st note: %s (source=%s)\n", res.Note, res.Source)
+	}
+	snapshot := strings.Contains(strings.ToLower(res.Note), "snapshot") ||
+		strings.Contains(res.Source, "spot") ||
+		strings.Contains(res.Source, "stock_info_a_code_name") ||
+		strings.Contains(res.Source, "stock_zh_a_st_em") ||
+		strings.Contains(strings.ToLower(res.Note), "no stable historical")
+	epoch, _ := types.ParseTradeDate("1990-01-01")
+	today := time.Now().In(time.FixedZone("CST", 8*3600)).Format("2006-01-02")
 	out := make([]types.STRecord, 0, len(res.Records))
+	rewrote := 0
 	for _, r := range res.Records {
 		if IsBSE(r.TSCode) {
 			continue
@@ -426,6 +480,11 @@ func (p *Provider) ST() ([]types.STRecord, error) {
 		ed, err := parseDate(r.EntryDate)
 		if err != nil {
 			return nil, err
+		}
+		// Rewrite fetch-day / missing historical entry so live backtests filter ST.
+		if snapshot || r.EntryDate == today || r.EntryDate == "" {
+			ed = epoch
+			rewrote++
 		}
 		rd, err := optDate(r.RemoveDate)
 		if err != nil {
@@ -437,6 +496,15 @@ func (p *Provider) ST() ([]types.STRecord, error) {
 			RemoveDate: rd,
 			STType:     r.STType,
 		})
+	}
+	if rewrote > 0 {
+		fmt.Fprintf(os.Stderr,
+			"akshare st: rewrote entry_date→1990-01-01 for %d/%d snapshot rows "+
+				"(no historical ST intervals from AKShare; conservative full-history ST filter)\n",
+			rewrote, len(out))
+	}
+	if len(out) == 0 {
+		fmt.Fprintf(os.Stderr, "akshare st: empty (note=%q source=%q)\n", res.Note, res.Source)
 	}
 	return out, nil
 }
@@ -514,6 +582,7 @@ func (p *Provider) Financials(tsCode types.SecurityID) ([]types.FinancialRow, er
 	}
 	out := make([]types.FinancialRow, 0, len(res.Rows))
 	skippedInvalid := 0
+	annProxy := 0
 	for _, r := range res.Rows {
 		rp, err := parseDate(r.ReportPeriod)
 		if err != nil {
@@ -525,10 +594,19 @@ func (p *Provider) Financials(tsCode types.SecurityID) ([]types.FinancialRow, er
 			continue
 		}
 		ad := rp
+		annIsProxy := true
 		if r.AnnouncementDate != "" {
 			if d, err := parseDate(r.AnnouncementDate); err == nil {
 				ad = d
+				if !d.Equal(rp) {
+					annIsProxy = false
+				}
 			}
+		}
+		if annIsProxy {
+			// Honest PIT gap: abstract path often sets announcement_date≈report_period.
+			// We do NOT invent a lag / fake NOTICE_DATE; GetLatestFinancial uses this as-is.
+			annProxy++
 		}
 		out = append(out, types.FinancialRow{
 			TSCode:           types.SecurityID(r.TSCode),
@@ -548,6 +626,12 @@ func (p *Provider) Financials(tsCode types.SecurityID) ([]types.FinancialRow, er
 		fmt.Fprintf(os.Stderr,
 			"akshare financials %s: skipped %d rows with missing equity/revenue/assets (not treating 0 as valid)\n",
 			tsCode, skippedInvalid)
+	}
+	if annProxy > 0 {
+		fmt.Fprintf(os.Stderr,
+			"akshare financials %s: %d/%d rows have announcement_date≈report_period "+
+				"(no true NOTICE_DATE; not inventing announcement lag)\n",
+			tsCode, annProxy, len(out))
 	}
 	return out, nil
 }

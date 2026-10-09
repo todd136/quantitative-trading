@@ -143,3 +143,50 @@ func TestNearlyEqual(t *testing.T) {
 		t.Fatal("should differ")
 	}
 }
+
+func TestApplyTargetsSkipCountsLimitBuy(t *testing.T) {
+	cfg := config.Default()
+	cfg.Backtest.InitialCash = 10_000_000
+	cfg.Execution.LotSize = 100
+
+	d0 := types.NewTradeDate(2025, 1, 10)
+	d1 := types.NewTradeDate(2025, 1, 13)
+	d2 := types.NewTradeDate(2025, 1, 14)
+	code := types.SecurityID("600000.SH")
+	mkBar := func(d types.TradeDate, open, highLim float64, suspended bool) types.Bar {
+		return types.Bar{
+			TradeDate: d, TSCode: code,
+			Open: open, High: open, Low: open, Close: open,
+			HighLimit: highLim, LowLimit: open * 0.9,
+			AdjFactor: 1, Volume: 1e6, Amount: 5e7,
+			Suspended: suspended, PreClose: open,
+		}
+	}
+	// d1 open == high limit → cannot buy
+	bars := map[types.SecurityID]map[string]types.Bar{
+		code: {
+			d0.String(): mkBar(d0, 10, 11, false),
+			d1.String(): mkBar(d1, 11, 11, false),
+			d2.String(): mkBar(d2, 10, 11, false),
+		},
+	}
+	cal := []types.TradeDate{d0, d1, d2}
+	eng := &backtest.Engine{
+		Cfg: cfg, Calendar: cal, CalIndex: universe.BuildIndex(cal), Bars: bars,
+	}
+	state := &backtest.PortfolioState{Cash: cfg.Backtest.InitialCash}
+	targets := []types.TargetHolding{{TSCode: code, Weight: 0.5}}
+	if err := eng.ApplyTargets(state, d1, targets, d2); err != nil {
+		t.Fatal(err)
+	}
+	if state.Shares(code) != 0 {
+		t.Fatal("limit-up buy must be skipped")
+	}
+	if eng.SkipCounts.IntendedBuyOrders != 1 || eng.SkipCounts.SkippedLimitBuy != 1 {
+		t.Fatalf("skip counts %+v", eng.SkipCounts)
+	}
+	rate := backtest.ComputeUnfilledSkipRate(&eng.SkipCounts)
+	if !rate.Available || rate.Value != 1.0 {
+		t.Fatalf("skip rate %v", rate)
+	}
+}

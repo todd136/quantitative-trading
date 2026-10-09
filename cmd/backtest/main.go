@@ -255,6 +255,8 @@ func main() {
 			fmt.Fprintf(os.Stderr, "bars preload progress: %d/%d\n", i+1, len(codes))
 		}
 	}
+	// Fill conventional high/low limits when vendor bars omit them (needed for Unbuyable / skip).
+	universe.EnrichBarsLimits(barsByCode, secMap, st)
 
 	uctx := &universe.Context{
 		Cfg:        cfg,
@@ -283,20 +285,43 @@ func main() {
 	}
 
 	var snaps []types.DailySnapshot
+	var factorPanels []backtest.DailyFactorPanel
+	const mvLookbackCalendarDays = 10 // nearest TotalMV on or before T within this window
 	for i := startIdx; i < endIdx-1; i++ { // -1: need next day for T+1
 		t := cal[i]
 		if !portfolio.IsRebalanceDay(t, cfg.Portfolio.RebalanceFreq, cfg.Portfolio.RebalanceWeekday, cal, calIndex) {
 			snaps = append(snaps, eng.MarkNAV(state, t))
 			continue
 		}
-		univ := universe.BuildUniverse(uctx, t, nil)
+		execDate, ok := eng.NextTradeDate(t)
+		if !ok {
+			break
+		}
+		// Respect end_date: do not exec past window
+		if cfg.Backtest.EndDate != "" {
+			ed, _ := types.ParseTradeDate(cfg.Backtest.EndDate)
+			if execDate.After(ed) {
+				snaps = append(snaps, eng.MarkNAV(state, t))
+				continue
+			}
+		}
+		// Pass T+1 bars so Unbuyable / CannotBuyAtOpen can use real open+limits when present.
+		execBars := map[types.SecurityID]types.Bar{}
+		for code, byDate := range barsByCode {
+			if b, ok := byDate[execDate.String()]; ok {
+				execBars[code] = b
+			}
+		}
+		univ := universe.BuildUniverse(uctx, t, execBars)
 		uCodes := make([]types.SecurityID, 0, len(univ))
 		industry := map[types.SecurityID]string{}
+		unbuyable := map[types.SecurityID]bool{}
 		for _, s := range univ {
 			uCodes = append(uCodes, s.Security.TSCode)
 			industry[s.Security.TSCode] = s.Industry
+			unbuyable[s.Security.TSCode] = s.Unbuyable
 		}
-		fmt.Fprintf(os.Stderr, "universe %s: eligible=%d of %d securities\n", t, len(univ), len(secMap))
+		fmt.Fprintf(os.Stderr, "universe %s: eligible=%d of %d securities (exec=%s)\n", t, len(univ), len(secMap), execDate)
 
 		rawQ := map[types.SecurityID]float64{}
 		rawV := map[types.SecurityID]float64{}
@@ -308,10 +333,11 @@ func main() {
 				if q, ok := factors.RawQuality(fin); ok {
 					rawQ[code] = q
 				}
-				// Require real TotalMV for T; never invent MV from Close*constant.
-				mvList, _ := prov.MarketValues(code, t, t)
-				if len(mvList) > 0 {
-					if v, ok := factors.RawValue(fin, mvList[0].TotalMV); ok {
+				// Require real TotalMV on/before T; never invent MV from Close*constant.
+				mvFrom := types.TradeDate(t.Time().AddDate(0, 0, -mvLookbackCalendarDays))
+				mvList, _ := prov.MarketValues(code, mvFrom, t)
+				if mv, ok := factors.MarketValueAsOf(mvList, t, mvLookbackCalendarDays); ok {
+					if v, ok := factors.RawValue(fin, mv); ok {
 						rawV[code] = v
 					}
 				}
@@ -325,26 +351,56 @@ func main() {
 		_, _ = plugin.Annotate(nil, t, uCodes)
 
 		comp := portfolio.CompositeEqualWeight(cfg, pipe.Scores, industry)
-		targets := portfolio.SelectHoldings(comp, cfg.Portfolio.N, cfg.Portfolio.IndustryCapRatio)
-
-		execDate, ok := eng.NextTradeDate(t)
-		if !ok {
-			break
-		}
-		// Respect end_date: do not exec past window
-		if cfg.Backtest.EndDate != "" {
-			ed, _ := types.ParseTradeDate(cfg.Backtest.EndDate)
-			if execDate.After(ed) {
-				snaps = append(snaps, eng.MarkNAV(state, t))
+		// Drop Unbuyable names from *new* opens (still in universe for research scores).
+		compTradable := make([]types.CompositeResult, 0, len(comp))
+		for _, c := range comp {
+			if unbuyable[c.TSCode] {
 				continue
 			}
+			compTradable = append(compTradable, c)
 		}
+		targets := portfolio.SelectHoldings(compTradable, cfg.Portfolio.N, cfg.Portfolio.IndustryCapRatio)
+
 		nextAvail, _ := eng.NextTradeDate(execDate)
 		if err := eng.ApplyTargets(state, execDate, targets, nextAvail); err != nil {
 			fmt.Fprintf(os.Stderr, "exec %s: %v\n", execDate, err)
 			os.Exit(1)
 		}
 		snaps = append(snaps, eng.MarkNAV(state, execDate))
+
+		// Persist daily factor panel aligned to execDate (Weights snap date) for §6.2 exposure.
+		panel := backtest.DailyFactorPanel{
+			TradeDate:  execDate,
+			Quality:    map[types.SecurityID]float64{},
+			Value:      map[types.SecurityID]float64{},
+			Momentum:   map[types.SecurityID]float64{},
+			Composite:  map[types.SecurityID]float64{},
+			ForwardRet: map[types.SecurityID]float64{},
+		}
+		for code, fs := range pipe.Scores {
+			if fs.Quality != nil {
+				panel.Quality[code] = *fs.Quality
+			}
+			if fs.Value != nil {
+				panel.Value[code] = *fs.Value
+			}
+			if fs.Momentum != nil {
+				panel.Momentum[code] = *fs.Momentum
+			}
+		}
+		for _, c := range comp {
+			panel.Composite[c.TSCode] = c.Composite
+		}
+		// Optional real 1-day forward return: signal close T → exec close T+1 (never invented).
+		for _, code := range uCodes {
+			if fr, ok := factors.ForwardCloseReturn(barsByCode[code], t, execDate); ok {
+				panel.ForwardRet[code] = fr
+			}
+		}
+		if len(panel.ForwardRet) == 0 {
+			panel.ForwardRet = nil // keep layered N/A honest when no real forwards
+		}
+		factorPanels = append(factorPanels, panel)
 	}
 
 	backtest.AnnotateDailyActivity(snaps, state.Fills)
@@ -378,8 +434,14 @@ func main() {
 		}
 		extras.IndustryLookup = backtest.BuildIndustryLookupFromRecords(inds, cfg.Processing.IndustrySource, asof)
 	}
-	// SkipCounts / FactorPanels / LlmCounters / AttributionPeriods remain unset until
-	// the engine and signal loop expose those counters — report stays honest N/A.
+	if eng.SkipCounts.IntendedBuyOrders+eng.SkipCounts.IntendedSellOrders > 0 {
+		sc := eng.SkipCounts
+		extras.SkipCounts = &sc
+	}
+	if len(factorPanels) > 0 {
+		extras.FactorPanels = factorPanels
+	}
+	// AttributionPeriods / LlmCounters remain unset until those inputs exist — honest N/A.
 	report, err := backtest.BuildReportWithExtras(cfg, snaps, state.Fills, bench, extras)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "report: %v\n", err)

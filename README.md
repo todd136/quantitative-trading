@@ -90,6 +90,10 @@ python3 scripts/akshare_fetch.py index --symbol 000300.SH --start 2024-01-01 --e
 - Live China market data quality/availability varies by AKShare version and upstream sites.
 - Fixture remains the CI default (`data.provider: fixture`).
 - ST / suspend / daily MV / full financials are **best-effort**; helper returns empty lists + `note` when APIs are missing or unstable (no crash).
+- **ST PIT gap**: AKShare has no historical ST intervals; snapshot ST names are stamped `entry_date=1990-01-01` (conservative full-history filter) with an honest note — not invented interval history.
+- **Financial PIT gap**: `stock_financial_abstract` often sets `announcement_date≈report_period` (no NOTICE_DATE). We do **not** invent announcement lags; EM sheets path is preferred when abstract is empty.
+- **Limit prices**: daily hist often lacks official high/low limits; helper/Go fill conventional board bands from `pre_close` (10%/20%/5% ST) so Unbuyable / skip logic can run — not inventing fills.
+- Suspend: no stable historical suspend-interval API; `bars.suspended` inferred from `volume==0`.
 - BSE (`8xxxxx` / `4xxxxx` / `BJ`) is filtered out in helper and Go `MapBoard`.
 
 ## Data providers
@@ -140,10 +144,10 @@ CLI may print a **fixture demo** total return for the formal segment — that va
 | Avg holdings count, max single-name weight | Implemented when Holdings/Weights on snaps |
 | Per-year breakdown tables | **Implemented** (per segment: overall + Train/Val/OOS when `sample_split` set; see `yearly` in report.json / report.md) |
 | Industry distribution time series | **Implemented when** `ReportExtras.IndustryLookup` + snap `Weights` present (CLI wires SW_L1 lookup from industry records); else N/A |
-| Factor exposure time series | **Skeleton**: computes portfolio-weighted composite + per-factor exposure when `DailyFactorPanel` + `Weights` provided; else N/A (CLI does not yet persist daily panels) |
-| Limit/suspend unfilled skip rate | **N/A** until engine exposes skip counters (`ExecutionSkipCounts`); note explains ApplyTargets does not tally yet |
+| Factor exposure time series | **Implemented when** CLI persists `DailyFactorPanel` + snap `Weights` (wired in `cmd/backtest`); else N/A |
+| Limit/suspend unfilled skip rate | **Implemented when** engine `SkipCounts` has intended orders > 0 (ApplyTargets tallies limit/suspend skips); else N/A |
 | Brinson / simple attribution | **Skeleton**: method documented in report; computes Allocation/Selection/Interaction when `AttributionPeriods` provided; else N/A |
-| Factor long-short / layer returns | **Skeleton**: quantile + long-short only when panels include real `ForwardRet`; refuses to invent forward returns |
+| Factor long-short / layer returns | **Implemented when** panels include real `ForwardRet` (CLI attaches T→T+1 close/close when bars exist); else N/A (never invents) |
 | Walk-forward multi-window execution | Skeleton config / note only — no fake multi-window runs |
 | LLM coverage / degrade stats | N/A until LLM path enabled **with counters** (`LlmRunCounters`); schema ready |
 

@@ -38,17 +38,20 @@ type securitiesResult struct {
 }
 
 type barJSON struct {
-	TradeDate string  `json:"trade_date"`
-	TSCode    string  `json:"ts_code"`
-	Open      float64 `json:"open"`
-	High      float64 `json:"high"`
-	Low       float64 `json:"low"`
-	Close     float64 `json:"close"`
-	Volume    float64 `json:"volume"`
-	Amount    float64 `json:"amount"`
-	PreClose  float64 `json:"pre_close"`
-	AdjFactor float64 `json:"adj_factor"`
-	Suspended bool    `json:"suspended"`
+	TradeDate   string  `json:"trade_date"`
+	TSCode      string  `json:"ts_code"`
+	Open        float64 `json:"open"`
+	High        float64 `json:"high"`
+	Low         float64 `json:"low"`
+	Close       float64 `json:"close"`
+	Volume      float64 `json:"volume"`
+	Amount      float64 `json:"amount"`
+	PreClose    float64 `json:"pre_close"`
+	HighLimit   float64 `json:"high_limit"`
+	LowLimit    float64 `json:"low_limit"`
+	AdjFactor   float64 `json:"adj_factor"`
+	Suspended   bool    `json:"suspended"`
+	LimitStatus string  `json:"limit_status"`
 }
 
 type barsResult struct {
