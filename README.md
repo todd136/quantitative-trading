@@ -179,11 +179,19 @@ Writes under `-out`:
 | Walk-forward multi-window execution | Skeleton config / note only — no fake multi-window runs |
 | LLM coverage / degrade stats | N/A until LLM path enabled **with counters** (`LlmRunCounters`); schema ready |
 
+## Research (local branches)
+
+Strategy experiments live on `research/*` branches and dedicated configs — they do **not** change v1.2 formal defaults in `configs/example.yaml` (daily rebalance).
+
+- Iter-1 (H1 weekly rebalance): [`docs/research_strategy_iter_1.md`](docs/research_strategy_iter_1.md), config `configs/research_strategy_iter_1.yaml`
+
 ## Layout
 
 ```
 cmd/backtest/          CLI → nav/fills + report.json/metrics.csv/report.md
 configs/example.yaml
+configs/research_strategy_iter_1.yaml   # research H1 weekly (not production default)
+docs/research_strategy_iter_1.md
 internal/
   types/ config/ data/{fixture,akshare}/
   universe/ factors/ portfolio/ backtest/ llm/
