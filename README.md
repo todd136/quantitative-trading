@@ -119,8 +119,36 @@ Writes under `-out` (default `output/backtest_run/`):
 | `report.json` | Full §6 report: spec version, frozen config, per-segment metrics |
 | `metrics.csv` | Flattened metric rows (`available` / value / note) |
 | `report.md` | Human-readable header + tables (no invented numbers) |
+| `paper_targets.csv` / `paper_targets.md` | When `paper_export.enabled` or `-paper`: next-day target list for paper following |
 
 CLI may print a **fixture demo** total return for the formal segment — that value is computed from the short fixture run's NAV, labeled as fixture demo, **not** live market results.
+
+### Paper / simulation holdings export（模拟盘名单）
+
+Exports **next-day intended target holdings only** — no auto orders, not investment advice, no fabricated returns.
+
+```yaml
+paper_export:
+  enabled: true   # or pass CLI -paper
+portfolio:
+  rebalance_freq: "weekly"   # daily|weekly|monthly — fewer target days for paper following
+  rebalance_weekday: 2       # weekly: 0=Mon .. 6=Sun (config style)
+```
+
+```bash
+go run ./cmd/backtest -config configs/example.yaml -out output/backtest_run -paper
+# or enable paper_export.enabled in YAML and omit -paper
+```
+
+Writes under `-out`:
+
+| File | Contents |
+|------|----------|
+| `paper_targets.csv` | signal_date, exec_date (T+1), symbol, target_weight, prev/new weight, action (ENTER/EXIT/INCREASE/DECREASE/HOLD), target_shares, price_used |
+| `paper_targets.md` | Same rows + honest notes (shares blank if NAV/close missing) |
+
+**Weekly:** only rebalance signal days emit targets (engine already skips non-rebalance days via `IsRebalanceDay`). **Shares:** estimated as `weight × NAV / signal-day close`, floored to `execution.lot_size` when price+NAV known; otherwise weights-only with an MD note.
+
 
 ### Metric conventions
 

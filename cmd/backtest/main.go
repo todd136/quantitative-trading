@@ -164,6 +164,7 @@ func resolveDataWindow(cfg config.Config, cal []types.TradeDate) (from, to types
 func main() {
 	cfgPath := flag.String("config", "configs/example.yaml", "path to YAML config")
 	outDir := flag.String("out", "output/backtest_run", "output directory for nav/fills/reports")
+	paperFlag := flag.Bool("paper", false, "force paper/simulation target export (paper_targets.csv/.md); overrides paper_export.enabled")
 	flag.Parse()
 
 	cfg, err := config.Load(*cfgPath)
@@ -286,6 +287,7 @@ func main() {
 
 	var snaps []types.DailySnapshot
 	var factorPanels []backtest.DailyFactorPanel
+	var paperDays []backtest.PaperTargetDay
 	benchUnivByDate := map[string][]types.SecurityID{} // eligible universe per exec snap date (EW Brinson bench)
 	const mvLookbackCalendarDays = 10 // nearest TotalMV on or before T within this window
 	for i := startIdx; i < endIdx-1; i++ { // -1: need next day for T+1
@@ -364,6 +366,24 @@ func main() {
 			compTradable = append(compTradable, c)
 		}
 		targets := portfolio.SelectHoldings(compTradable, cfg.Portfolio.N, cfg.Portfolio.IndustryCapRatio)
+
+		// Paper export: intended targets on this signal day (pre-fill). NAV from mark before exec.
+		markBefore := eng.MarkNAV(state, t)
+		paperNav := markBefore.NAV
+		if paperNav <= 0 {
+			paperNav = cfg.Backtest.InitialCash
+		}
+		paperCodes := make([]types.SecurityID, 0, len(targets))
+		for _, th := range targets {
+			paperCodes = append(paperCodes, th.TSCode)
+		}
+		paperDays = append(paperDays, backtest.PaperTargetDay{
+			SignalDate: t,
+			ExecDate:   execDate,
+			Weights:    backtest.TargetsToWeightMap(targets),
+			NAV:        paperNav,
+			Prices:     backtest.CollectSignalCloses(paperCodes, t, barsByCode),
+		})
 
 		nextAvail, _ := eng.NextTradeDate(execDate)
 		if err := eng.ApplyTargets(state, execDate, targets, nextAvail); err != nil {
@@ -466,6 +486,19 @@ func main() {
 		os.Exit(1)
 	}
 
+	paperCSV, paperMD := "", ""
+	exportPaper := cfg.PaperExport.Enabled || *paperFlag
+	if exportPaper {
+		res := backtest.BuildPaperTargets(paperDays, cfg.Execution.LotSize)
+		paperCSV, paperMD, err = backtest.WritePaperTargets(*outDir, res)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "paper export: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Fprintf(os.Stderr, "paper export: %d rows (%s) rebalance_freq=%s\n",
+			len(res.Rows), backtest.SummarizePaperActions(res.Rows), cfg.Portfolio.RebalanceFreq)
+	}
+
 	fmt.Println("spec_version:", cfg.Version)
 	fmt.Println("provider:", cfg.Data.Provider)
 	fmt.Println("llm.enabled:", cfg.LLM.Enabled)
@@ -474,6 +507,10 @@ func main() {
 	fmt.Println("report_json:", jsonPath)
 	fmt.Println("metrics_csv:", csvPath)
 	fmt.Println("report_md:", mdPath)
+	if exportPaper {
+		fmt.Println("paper_csv:", paperCSV)
+		fmt.Println("paper_md:", paperMD)
+	}
 	fmt.Println("snapshots:", len(snaps), "fills:", len(state.Fills))
 	fmt.Println("formal_segment:", report.FormalSegment)
 	if formal, ok := report.Segments[string(report.FormalSegment)]; ok && formal.Metrics.HasCurve {

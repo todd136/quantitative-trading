@@ -89,3 +89,9 @@ llm:
     log_prompt_full: false
     log_structured_summary: true
     compliance_notice: "non_investment_advice"
+
+# Paper / simulation: export next-day target list only (no auto orders).
+# Cadence follows portfolio.rebalance_freq (daily|weekly|monthly).
+# Or pass CLI -paper to force enable for one run.
+paper_export:
+  enabled: true

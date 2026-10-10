@@ -20,8 +20,9 @@ type Config struct {
 	Costs      CostsConfig      `yaml:"costs"`
 	Execution  ExecutionConfig  `yaml:"execution"`
 	Backtest   BacktestConfig   `yaml:"backtest"`
-	LLM        LLMConfig        `yaml:"llm"`
-	Data       DataConfig       `yaml:"data"`
+	LLM         LLMConfig         `yaml:"llm"`
+	Data        DataConfig        `yaml:"data"`
+	PaperExport PaperExportConfig `yaml:"paper_export"`
 }
 
 type MarketConfig struct {
@@ -174,6 +175,14 @@ type DataConfig struct {
 	MaxSymbols int `yaml:"max_symbols"`
 }
 
+// PaperExportConfig controls simulation / paper-trading target-list export.
+// When enabled, cmd/backtest writes paper_targets.csv + paper_targets.md (intended
+// next-day holdings only — no auto orders). Rebalance cadence uses portfolio.rebalance_freq
+// (daily|weekly|monthly); non-rebalance signal days are skipped.
+type PaperExportConfig struct {
+	Enabled bool `yaml:"enabled"`
+}
+
 // Default returns v1.2 locked defaults from the spec appendix A.
 func Default() Config {
 	return Config{
@@ -268,6 +277,9 @@ func Default() Config {
 			AKSharePython:   "python3",
 			AKShareHelper:   "scripts/akshare_fetch.py",
 			AKShareCacheDir: "testdata/akshare_cache",
+		},
+		PaperExport: PaperExportConfig{
+			Enabled: false,
 		},
 	}
 }
