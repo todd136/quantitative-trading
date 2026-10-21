@@ -263,6 +263,9 @@ func BuildUniverse(ctx *Context, t types.TradeDate, execBars map[types.SecurityI
 			continue
 		}
 		ind := IndustryOn(ctx.Industry, code, t, ctx.Cfg.Processing.IndustrySource)
+		if !industryAllowlisted(ctx.Cfg.Universe.IndustryAllowlist, ind) {
+			continue
+		}
 		snap := Snapshot{
 			Security: sm,
 			BarT:     barT,
@@ -280,4 +283,22 @@ func BuildUniverse(ctx *Context, t types.TradeDate, execBars map[types.SecurityI
 		out = append(out, snap)
 	}
 	return out
+}
+
+// industryAllowlisted reports whether ind is permitted by allowlist.
+// Empty allowlist → all industries allowed (including missing "").
+// Non-empty allowlist → ind must be non-empty and present in the list.
+func industryAllowlisted(allowlist []string, ind string) bool {
+	if len(allowlist) == 0 {
+		return true
+	}
+	if ind == "" {
+		return false
+	}
+	for _, a := range allowlist {
+		if a == ind {
+			return true
+		}
+	}
+	return false
 }

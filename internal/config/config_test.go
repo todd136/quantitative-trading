@@ -78,3 +78,18 @@ func TestMaxPerIndustry(t *testing.T) {
 		t.Fatalf("got %d", c.MaxPerIndustry())
 	}
 }
+
+func TestIndustryAllowlistDefaultEmpty(t *testing.T) {
+	c := config.Default()
+	if len(c.Universe.IndustryAllowlist) != 0 {
+		t.Fatalf("Default IndustryAllowlist must be empty, got %v", c.Universe.IndustryAllowlist)
+	}
+	path := filepath.Join("..", "..", "configs", "example.yaml")
+	loaded, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.Universe.IndustryAllowlist) != 0 {
+		t.Fatalf("example.yaml omit allowlist must stay empty, got %v", loaded.Universe.IndustryAllowlist)
+	}
+}

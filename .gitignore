@@ -12,3 +12,4 @@ output/
 testdata/akshare_cache/
 __pycache__/
 *.pyc
+logs/

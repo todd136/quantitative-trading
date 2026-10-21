@@ -32,9 +32,14 @@ type MarketConfig struct {
 }
 
 type UniverseConfig struct {
-	MinListTradingDays int     `yaml:"min_list_trading_days"`
-	MinADV20           float64 `yaml:"min_adv_20"`
-	MinADVValidDays    int     `yaml:"min_adv_valid_days"`
+	MinListTradingDays  int      `yaml:"min_list_trading_days"`
+	MinADV20            float64  `yaml:"min_adv_20"`
+	MinADVValidDays     int      `yaml:"min_adv_valid_days"`
+	// IndustryAllowlist optionally restricts the investable universe to names whose
+	// PIT industry (Processing.IndustrySource, usually SW_L1) is in this set on the
+	// signal date. Empty/omitted → no industry filter (identical to prior behavior).
+	// Missing industry on a name → excluded when the list is non-empty.
+	IndustryAllowlist []string `yaml:"industry_allowlist"`
 }
 
 type FactorWeight struct {
