@@ -178,6 +178,10 @@ type DataConfig struct {
 	// MaxSymbols caps securities loaded during Bars preload (0 = all).
 	// Debug-only smoke sampling — production runs must use date-window truncation, not permanent sampling.
 	MaxSymbols int `yaml:"max_symbols"`
+	// StrictPIT fail-closes formal results when financials use announce≈period
+	// shortcuts, MV is a current snapshot stamped on history, or ST/industry
+	// records have no historical effective interval. Default false.
+	StrictPIT bool `yaml:"strict_pit"`
 }
 
 // PaperExportConfig controls simulation / paper-trading target-list export.

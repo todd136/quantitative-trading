@@ -61,6 +61,7 @@ data:
   akshare_python: ".venv/bin/python"
   akshare_helper: "scripts/akshare_fetch.py"
   akshare_cache_dir: "testdata/akshare_cache"
+  strict_pit: true             # fail-closed formal PIT (NOTICE_DATE financials, historical MV, no ST/industry backfill)
   # First formal smoke: capped universe (40–100). Production uses date-window only.
   max_symbols: 60
 llm:

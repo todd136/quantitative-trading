@@ -76,4 +76,14 @@ func TestBuildUniverseSetsUnbuyableFromExecBars(t *testing.T) {
 	if !univ[0].Unbuyable {
 		t.Fatal("expected Unbuyable from T+1 limit-up open")
 	}
+
+	// Signal-day selection must not consult T+1 bars: nil execBars ⇒ Unbuyable stays false
+	// even when the next session is limit-up in ctx.Bars.
+	univT := universe.BuildUniverse(uctx, td, nil)
+	if len(univT) != 1 {
+		t.Fatalf("univT=%d", len(univT))
+	}
+	if univT[0].Unbuyable {
+		t.Fatal("nil execBars must not leak T+1 limit-up into signal-day Unbuyable")
+	}
 }

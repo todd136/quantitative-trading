@@ -185,6 +185,19 @@ def _f(v: Any, default: float = 0.0) -> float:
         return default
 
 
+def announcement_fields(announce: str, period: str) -> tuple[str, bool]:
+    """Return (announcement_date, is_proxy). Never invent a NOTICE_DATE.
+
+    Empty announce → empty date + proxy. announce==period → date kept but proxy.
+    Callers in --strict-pit must drop proxy rows rather than treat period as visible.
+    """
+    a = (announce or "").strip()
+    p = (period or "").strip()
+    if not a:
+        return "", True
+    return a, a == p
+
+
 def _f_opt(v: Any) -> Optional[float]:
     """Parse a numeric field; return None when missing/NaN/unparseable (never invent 0)."""
     if v is None:
@@ -641,16 +654,26 @@ def cmd_st(args: argparse.Namespace) -> int:
                 "returned current snapshot if available, else empty"
             )
         if records:
-            # Snapshot only — stamp conservative entry_date so historical backtests
-            # still exclude currently-ST names. Go may also rewrite; keep honest note.
+            strict_pit = bool(getattr(args, "strict_pit", False))
             snap_note = (
                 "ST is a current snapshot (no historical entry/remove intervals from AKShare); "
-                "entry_date stamped 1990-01-01 (conservative full-history filter for currently-ST names); "
-                "remove_date=null. Not inventing true ST intervals."
+                "not inventing true ST intervals."
             )
+            if strict_pit:
+                snap_note += " strict_pit: leaving snapshot dates unstamped; Go must reject."
+                for rec in records:
+                    rec["is_snapshot"] = True
+                    rec["pit_backfill"] = True
+            else:
+                snap_note += (
+                    " entry_date stamped 1990-01-01 (conservative full-history filter "
+                    "for currently-ST names); remove_date=null."
+                )
+                for rec in records:
+                    rec["entry_date"] = "1990-01-01"
+                    rec["is_snapshot"] = True
+                    rec["pit_backfill"] = True
             note = (note + "; " if note else "") + snap_note
-            for rec in records:
-                rec["entry_date"] = "1990-01-01"
         _emit({"records": records, "note": note, "source": source or "none"}, args.out)
         return 0
     except SystemExit:
@@ -713,6 +736,7 @@ def cmd_industry(args: argparse.Namespace) -> int:
                 "effective_date": eff,
                 "expire_date": None,
                 "source": "SW_L1",
+                "pit_backfill": eff == "2000-01-01",
             }
             n += 1
         return n
@@ -916,6 +940,7 @@ def cmd_industry(args: argparse.Namespace) -> int:
                     "effective_date": "2000-01-01",
                     "expire_date": None,
                     "source": "EM_INDUSTRY",
+                    "pit_backfill": True,
                 }
             if (i + 1) % 5 == 0:
                 time.sleep(0.35)
@@ -965,17 +990,25 @@ def cmd_financials(args: argparse.Namespace) -> int:
     note_parts: list[str] = []
     source = ""
     tried: list[str] = []
+    strict_pit = bool(getattr(args, "strict_pit", False))
 
     def _emit_rows(rows_in: list[dict], src: str, notes: list[str]) -> int:
+        kept = list(rows_in)
+        if strict_pit:
+            kept = [r for r in kept if not r.get("announcement_is_proxy")]
+            if rows_in and not kept:
+                notes = list(notes) + [
+                    "strict_pit: dropped announce≈period / missing NOTICE_DATE rows"
+                ]
         note = "; ".join([n for n in notes if n])
-        if not rows_in:
+        if not kept:
             note = note or (
                 "financials APIs unavailable or schema unmatched; "
                 f"tried={tried}. Returning empty (no fabricated zeros)."
             )
             print(note, file=sys.stderr)
         _emit(
-            {"symbol": ts, "rows": rows_in, "note": note, "source": src or "none"},
+            {"symbol": ts, "rows": kept, "note": note, "source": src or "none"},
             args.out,
         )
         return 0
@@ -1008,10 +1041,12 @@ def cmd_financials(args: argparse.Namespace) -> int:
             gp = None  # leave 0 only when truly unknown — mark via note; store 0 but Quality uses it
             # GrossProfit==0 with Revenue>0 is a valid edge (zero margin); allow 0.
             gp = 0.0
+        ann, is_proxy = announcement_fields(announce, period)
         return {
             "ts_code": ts,
             "report_period": period,
-            "announcement_date": announce or period,
+            "announcement_date": ann,
+            "announcement_is_proxy": is_proxy,
             "net_profit": float(net_profit) if net_profit is not None else 0.0,
             "revenue": float(revenue),
             "gross_profit": float(gp),
@@ -1024,8 +1059,9 @@ def cmd_financials(args: argparse.Namespace) -> int:
 
     try:
         # --- Path A: stock_financial_abstract (wide indicator × period) ---
+        # Strict PIT skips this path: it has no NOTICE_DATE (announce≈period).
         abs_fn = getattr(ak, "stock_financial_abstract", None)
-        if callable(abs_fn):
+        if callable(abs_fn) and not strict_pit:
             tried.append("stock_financial_abstract")
             try:
                 df = _with_retry(lambda: abs_fn(symbol=code), tries=3, label=f"fin_abstract({ts})")
@@ -1376,7 +1412,11 @@ def cmd_mv(args: argparse.Namespace) -> int:
                 note_parts.append(f"stock_zh_a_daily MV: {e}")
 
         # --- Path C: snapshot (often blocked) ---
-        if not values:
+        # Never stamp start/end/today as a historical trade_date. Strict PIT
+        # skips this path; non-strict emits is_snapshot=true with empty date so
+        # Go cannot backfill history.
+        strict_pit = bool(getattr(args, "strict_pit", False))
+        if not values and not strict_pit:
             snap = getattr(ak, "stock_individual_info_em", None)
             if callable(snap):
                 try:
@@ -1392,23 +1432,28 @@ def cmd_mv(args: argparse.Namespace) -> int:
                     float_mv = _f_opt(kv.get("流通市值", kv.get("流通市值(元)")))
                     total_share = _f_opt(kv.get("总股本", kv.get("总股本(股)")))
                     float_share = _f_opt(kv.get("流通股", kv.get("流通股(股)")))
-                    day = start or end or datetime.now().strftime("%Y-%m-%d")
                     if total_mv is not None and total_mv > 0:
                         values.append(
                             {
-                                "trade_date": day,
+                                "trade_date": "",
                                 "ts_code": ts,
                                 "total_share": float(total_share or 0.0),
                                 "float_share": float(float_share or 0.0),
                                 "total_mv": float(total_mv),
                                 "float_mv": float(float_mv or 0.0),
+                                "is_snapshot": True,
                             }
                         )
-                        note_parts.append("snapshot only (no daily history from this path)")
+                        note_parts.append(
+                            "snapshot only (no daily history; trade_date left empty, "
+                            "is_snapshot=true — not a historical MV)"
+                        )
                     else:
                         note_parts.append("stock_individual_info_em missing/invalid 总市值")
                 except Exception as e:  # noqa: BLE001
                     note_parts.append(f"stock_individual_info_em: {e}")
+        elif not values and strict_pit:
+            note_parts.append("strict_pit: skipped current MV snapshot path")
 
         if not values:
             note_parts.append(
@@ -1505,6 +1550,11 @@ def cmd_index(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description="AKShare fetch helper for quantitative-trading")
     ap.add_argument("--out", help="write JSON to path instead of stdout")
+    ap.add_argument(
+        "--strict-pit",
+        action="store_true",
+        help="fail-closed: skip announce≈period financials, snapshot MV, and ST date stamping",
+    )
     sub = ap.add_subparsers(dest="cmd", required=False)
 
     p = sub.add_parser("ping", help="check helper / akshare import")

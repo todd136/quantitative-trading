@@ -48,71 +48,12 @@ func openProvider(cfg config.Config) (data.Provider, error) {
 			HelperPath:  helper,
 			CacheDir:    cache,
 			SkipNetwork: false,
+			StrictPIT:   cfg.Data.StrictPIT,
 		}), nil
 	default:
 		return nil, fmt.Errorf("unknown data.provider %q (want fixture|akshare)", cfg.Data.Provider)
 	}
 }
-
-func resolveWindow(cal []types.TradeDate, cfg config.Config) (startIdx, endIdx int, err error) {
-	// endIdx is exclusive upper bound into cal for the signal/exec loop.
-	if len(cal) < 3 {
-		return 0, 0, fmt.Errorf("calendar too short")
-	}
-	startIdx, endIdx = 0, len(cal)-1
-
-	if cfg.Backtest.StartDate != "" {
-		sd, e := types.ParseTradeDate(cfg.Backtest.StartDate)
-		if e != nil {
-			return 0, 0, fmt.Errorf("start_date: %w", e)
-		}
-		found := false
-		for i, d := range cal {
-			if !d.Before(sd) {
-				startIdx = i
-				found = true
-				break
-			}
-		}
-		if !found {
-			return 0, 0, fmt.Errorf("start_date %s after calendar end", cfg.Backtest.StartDate)
-		}
-	} else {
-		// Legacy short fixture window: need momentum lookback headroom.
-		startIdx = len(cal) - 8
-		if startIdx < 260 {
-			startIdx = 260
-		}
-	}
-
-	if cfg.Backtest.EndDate != "" {
-		ed, e := types.ParseTradeDate(cfg.Backtest.EndDate)
-		if e != nil {
-			return 0, 0, fmt.Errorf("end_date: %w", e)
-		}
-		found := false
-		for i := len(cal) - 1; i >= 0; i-- {
-			if !cal[i].After(ed) {
-				endIdx = i + 1 // exclusive
-				found = true
-				break
-			}
-		}
-		if !found {
-			return 0, 0, fmt.Errorf("end_date %s before calendar start", cfg.Backtest.EndDate)
-		}
-	}
-
-	// Leave one day for T+1 exec beyond last signal day.
-	if endIdx > len(cal)-1 {
-		endIdx = len(cal) - 1
-	}
-	if endIdx <= startIdx+1 {
-		return 0, 0, fmt.Errorf("date window too short: startIdx=%d endIdx=%d", startIdx, endIdx)
-	}
-	return startIdx, endIdx, nil
-}
-
 
 // lookbackCalendarDays covers momentum(~252 trading days), ADV20, and min_list_trading_days(60).
 const lookbackCalendarDays = 400
@@ -227,8 +168,34 @@ func main() {
 		}
 	}
 
-	st, _ := prov.ST()
-	inds, _ := prov.Industry()
+	st, err := prov.ST()
+	if err != nil {
+		if cfg.Data.StrictPIT {
+			fmt.Fprintf(os.Stderr, "st (strict PIT): %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Fprintf(os.Stderr, "warning: st: %v\n", err)
+	}
+	if cfg.Data.StrictPIT {
+		if err := factors.ValidateSTForStrict(st); err != nil {
+			fmt.Fprintf(os.Stderr, "st (strict PIT): %v\n", err)
+			os.Exit(1)
+		}
+	}
+	inds, err := prov.Industry()
+	if err != nil {
+		if cfg.Data.StrictPIT {
+			fmt.Fprintf(os.Stderr, "industry (strict PIT): %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Fprintf(os.Stderr, "warning: industry: %v\n", err)
+	}
+	if cfg.Data.StrictPIT {
+		if err := factors.ValidateIndustryForStrict(inds); err != nil {
+			fmt.Fprintf(os.Stderr, "industry (strict PIT): %v\n", err)
+			os.Exit(1)
+		}
+	}
 
 	dataFrom, dataTo, err := resolveDataWindow(cfg, cal)
 	if err != nil {
@@ -279,50 +246,25 @@ func main() {
 	}
 	state := &backtest.PortfolioState{Cash: cfg.Backtest.InitialCash}
 
-	startIdx, endIdx, err := resolveWindow(cal, cfg)
+	startIdx, endIdx, err := backtest.ResolveWindow(cal, cfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "window: %v\n", err)
 		os.Exit(1)
 	}
 
-	var snaps []types.DailySnapshot
 	var factorPanels []backtest.DailyFactorPanel
 	var paperDays []backtest.PaperTargetDay
 	benchUnivByDate := map[string][]types.SecurityID{} // eligible universe per exec snap date (EW Brinson bench)
-	const mvLookbackCalendarDays = 10 // nearest TotalMV on or before T within this window
-	for i := startIdx; i < endIdx-1; i++ { // -1: need next day for T+1
-		t := cal[i]
-		if !portfolio.IsRebalanceDay(t, cfg.Portfolio.RebalanceFreq, cfg.Portfolio.RebalanceWeekday, cal, calIndex) {
-			snaps = append(snaps, eng.MarkNAV(state, t))
-			continue
-		}
-		execDate, ok := eng.NextTradeDate(t)
-		if !ok {
-			break
-		}
-		// Respect end_date: do not exec past window
-		if cfg.Backtest.EndDate != "" {
-			ed, _ := types.ParseTradeDate(cfg.Backtest.EndDate)
-			if execDate.After(ed) {
-				snaps = append(snaps, eng.MarkNAV(state, t))
-				continue
-			}
-		}
-		// Pass T+1 bars so Unbuyable / CannotBuyAtOpen can use real open+limits when present.
-		execBars := map[types.SecurityID]types.Bar{}
-		for code, byDate := range barsByCode {
-			if b, ok := byDate[execDate.String()]; ok {
-				execBars[code] = b
-			}
-		}
-		univ := universe.BuildUniverse(uctx, t, execBars)
+	const mvLookbackCalendarDays = 10                  // nearest TotalMV on or before T within this window
+
+	snaps, err := backtest.RunCalendar(eng, state, startIdx, endIdx, func(t, execDate types.TradeDate, closeSnap types.DailySnapshot) ([]types.TargetHolding, error) {
+		// Signal-day selection uses T bars only — never T+1 exec bars for Unbuyable/limit.
+		univ := universe.BuildUniverse(uctx, t, nil)
 		uCodes := make([]types.SecurityID, 0, len(univ))
 		industry := map[types.SecurityID]string{}
-		unbuyable := map[types.SecurityID]bool{}
 		for _, s := range univ {
 			uCodes = append(uCodes, s.Security.TSCode)
 			industry[s.Security.TSCode] = s.Industry
-			unbuyable[s.Security.TSCode] = s.Unbuyable
 		}
 		fmt.Fprintf(os.Stderr, "universe %s: eligible=%d of %d securities (exec=%s)\n", t, len(univ), len(secMap), execDate)
 		if len(uCodes) > 0 {
@@ -333,16 +275,33 @@ func main() {
 		rawV := map[types.SecurityID]float64{}
 		rawM := map[types.SecurityID]float64{}
 		for _, code := range uCodes {
-			fins, _ := prov.Financials(code)
-			fin, ok := factors.GetLatestFinancial(fins, t)
+			fins, ferr := prov.Financials(code)
+			if ferr != nil {
+				if cfg.Data.StrictPIT {
+					return nil, fmt.Errorf("financials %s: %w", code, ferr)
+				}
+			}
+			fin, ok := factors.GetLatestFinancialPIT(fins, t, cfg.Data.StrictPIT)
 			if ok {
 				if q, ok := factors.RawQuality(fin); ok {
 					rawQ[code] = q
 				}
 				// Require real TotalMV on/before T; never invent MV from Close*constant.
 				mvFrom := types.TradeDate(t.Time().AddDate(0, 0, -mvLookbackCalendarDays))
-				mvList, _ := prov.MarketValues(code, mvFrom, t)
-				if mv, ok := factors.MarketValueAsOf(mvList, t, mvLookbackCalendarDays); ok {
+				mvList, merr := prov.MarketValues(code, mvFrom, t)
+				if merr != nil {
+					if cfg.Data.StrictPIT {
+						return nil, fmt.Errorf("market value %s: %w", code, merr)
+					}
+				}
+				if cfg.Data.StrictPIT {
+					mv, err := factors.MarketValueAsOfPIT(mvList, t, mvLookbackCalendarDays, true)
+					if err == nil {
+						if v, ok := factors.RawValue(fin, mv); ok {
+							rawV[code] = v
+						}
+					}
+				} else if mv, ok := factors.MarketValueAsOf(mvList, t, mvLookbackCalendarDays); ok {
 					if v, ok := factors.RawValue(fin, mv); ok {
 						rawV[code] = v
 					}
@@ -357,19 +316,10 @@ func main() {
 		_, _ = plugin.Annotate(nil, t, uCodes)
 
 		comp := portfolio.CompositeEqualWeight(cfg, pipe.Scores, industry)
-		// Drop Unbuyable names from *new* opens (still in universe for research scores).
-		compTradable := make([]types.CompositeResult, 0, len(comp))
-		for _, c := range comp {
-			if unbuyable[c.TSCode] {
-				continue
-			}
-			compTradable = append(compTradable, c)
-		}
-		targets := portfolio.SelectHoldings(compTradable, cfg.Portfolio.N, cfg.Portfolio.IndustryCapRatio)
+		// Freeze Top-N on signal day. Limit/halt/unbuyable are applied at T+1 open only.
+		targets := portfolio.SelectHoldings(comp, cfg.Portfolio.N, cfg.Portfolio.IndustryCapRatio)
 
-		// Paper export: intended targets on this signal day (pre-fill). NAV from mark before exec.
-		markBefore := eng.MarkNAV(state, t)
-		paperNav := markBefore.NAV
+		paperNav := closeSnap.NAV
 		if paperNav <= 0 {
 			paperNav = cfg.Backtest.InitialCash
 		}
@@ -385,14 +335,6 @@ func main() {
 			Prices:     backtest.CollectSignalCloses(paperCodes, t, barsByCode),
 		})
 
-		nextAvail, _ := eng.NextTradeDate(execDate)
-		if err := eng.ApplyTargets(state, execDate, targets, nextAvail); err != nil {
-			fmt.Fprintf(os.Stderr, "exec %s: %v\n", execDate, err)
-			os.Exit(1)
-		}
-		snaps = append(snaps, eng.MarkNAV(state, execDate))
-
-		// Persist daily factor panel aligned to execDate (Weights snap date) for §6.2 exposure.
 		panel := backtest.DailyFactorPanel{
 			TradeDate:  execDate,
 			Quality:    map[types.SecurityID]float64{},
@@ -415,16 +357,20 @@ func main() {
 		for _, c := range comp {
 			panel.Composite[c.TSCode] = c.Composite
 		}
-		// Optional real 1-day forward return: signal close T → exec close T+1 (never invented).
 		for _, code := range uCodes {
 			if fr, ok := factors.ForwardCloseReturn(barsByCode[code], t, execDate); ok {
 				panel.ForwardRet[code] = fr
 			}
 		}
 		if len(panel.ForwardRet) == 0 {
-			panel.ForwardRet = nil // keep layered N/A honest when no real forwards
+			panel.ForwardRet = nil
 		}
 		factorPanels = append(factorPanels, panel)
+		return targets, nil
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "backtest: %v\n", err)
+		os.Exit(1)
 	}
 
 	backtest.AnnotateDailyActivity(snaps, state.Fills)

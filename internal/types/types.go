@@ -90,6 +90,9 @@ type STRecord struct {
 	EntryDate  TradeDate
 	RemoveDate *TradeDate // nil = still ST
 	STType     string
+	// PITBackfill is true when entry_date was stamped (e.g. 1990-01-01) because
+	// the vendor only provided a current ST snapshot. Strict PIT rejects these.
+	PITBackfill bool
 }
 
 // IndustryRecord is point-in-time industry membership.
@@ -100,6 +103,9 @@ type IndustryRecord struct {
 	EffectiveDate TradeDate
 	ExpireDate    *TradeDate
 	Source        string // SW_L1 / CITIC_L1
+	// PITBackfill is true when effective_date was stamped without a historical
+	// membership interval. Strict PIT rejects these.
+	PITBackfill bool
 }
 
 // FinancialRow is one financial statement snapshot keyed by announcement date.
@@ -115,6 +121,9 @@ type FinancialRow struct {
 	Equity           float64
 	OperatingCF      float64
 	StatementType    string // consolidated default
+	// AnnouncementIsProxy is true when announcement_date was filled with report_period
+	// (or otherwise invented). Strict PIT must reject these rows.
+	AnnouncementIsProxy bool
 }
 
 // MarketValue is daily market-cap / share data.
@@ -125,6 +134,10 @@ type MarketValue struct {
 	FloatShare float64
 	TotalMV    float64
 	FloatMV    float64
+	// IsSnapshot marks a current-day quote stamped onto a historical date.
+	// Strict PIT must reject these; even non-strict lookup skips them.
+	IsSnapshot bool
+	Source     string
 }
 
 // IndexBar is benchmark EOD.
@@ -185,6 +198,10 @@ type DailySnapshot struct {
 	Weights     map[SecurityID]float64
 	Turnover    float64
 	CostTotal   float64
+	// HaltValued lists holdings marked to last valid price because the name was
+	// suspended or the session bar was missing (halt-style gap). Empty when every
+	// holding had a live close.
+	HaltValued map[SecurityID]float64
 }
 
 // PublicText is a publicly available text document for optional LLM assist (PIT via AsofTS).

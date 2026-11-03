@@ -45,6 +45,15 @@ func TestLoadExampleYAML(t *testing.T) {
 	if c.Portfolio.N != 50 {
 		t.Fatalf("N=%d", c.Portfolio.N)
 	}
+	if c.Portfolio.IndustryCapRatio != 0.15 {
+		t.Fatalf("industry_cap_ratio=%v", c.Portfolio.IndustryCapRatio)
+	}
+	if c.Factors.Quality.Weight != 1 || c.Factors.Value.Weight != 1 || c.Factors.Momentum.Weight != 1 {
+		t.Fatalf("factor weights q/v/m=%v/%v/%v", c.Factors.Quality.Weight, c.Factors.Value.Weight, c.Factors.Momentum.Weight)
+	}
+	if !c.Data.StrictPIT {
+		t.Fatal("example.yaml formal fixture path should enable data.strict_pit")
+	}
 }
 
 func TestValidateLLMRequiresModelID(t *testing.T) {

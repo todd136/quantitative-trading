@@ -10,6 +10,7 @@ import sys
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out")
+    ap.add_argument("--strict-pit", action="store_true")
     sub = ap.add_subparsers(dest="cmd")
 
     sub.add_parser("ping")

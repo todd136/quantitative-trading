@@ -23,24 +23,9 @@ type Point struct {
 
 // GetLatestFinancial returns the latest row with announcement_date ≤ T (PIT hard rule §3.7).
 // Among those, prefers the newest report_period; ties broken by later announcement.
+// Rows with a zero announcement_date are invisible (never treat missing as epoch).
 func GetLatestFinancial(rows []types.FinancialRow, t types.TradeDate) (types.FinancialRow, bool) {
-	var best types.FinancialRow
-	found := false
-	for _, r := range rows {
-		if r.AnnouncementDate.After(t) {
-			continue // future announcement invisible
-		}
-		if !found {
-			best = r
-			found = true
-			continue
-		}
-		if r.ReportPeriod.After(best.ReportPeriod) ||
-			(r.ReportPeriod.Equal(best.ReportPeriod) && r.AnnouncementDate.After(best.AnnouncementDate)) {
-			best = r
-		}
-	}
-	return best, found
+	return GetLatestFinancialPIT(rows, t, false)
 }
 
 // RawQuality = (1/3)*(ROE + GrossMargin + (-DebtToAsset)) before cross-section pipeline.
