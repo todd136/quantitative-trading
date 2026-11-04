@@ -1,0 +1,8 @@
+[
+  {"trade_date": "2026-07-14", "ts_code": "SYNTH.SZ", "open": 50, "high": 50, "low": 50, "close": 50, "pre_close": 50, "high_limit": 55, "low_limit": 45, "adj_factor": 1, "volume": 1000000, "amount": 50000000},
+  {"trade_date": "2026-07-15", "ts_code": "SYNTH.SZ", "open": 50, "high": 50, "low": 50, "close": 50, "pre_close": 50, "high_limit": 55, "low_limit": 45, "adj_factor": 1, "volume": 1000000, "amount": 50000000},
+  {"trade_date": "2026-07-16", "ts_code": "SYNTH.SZ", "open": 50, "high": 50, "low": 50, "close": 50, "pre_close": 50, "high_limit": 55, "low_limit": 45, "adj_factor": 1, "volume": 1000000, "amount": 50000000},
+  {"trade_date": "2026-07-17", "ts_code": "SYNTH.SZ", "open": 35.285714285714285, "high": 35.285714285714285, "low": 35.285714285714285, "close": 35.285714285714285, "pre_close": 50, "high_limit": 38.81428571428571, "low_limit": 31.757142857142858, "adj_factor": 1, "volume": 1000000, "amount": 35000000},
+  {"trade_date": "2026-07-20", "ts_code": "SYNTH.SZ", "open": 35.285714285714285, "high": 35.285714285714285, "low": 35.285714285714285, "close": 35.285714285714285, "pre_close": 35.285714285714285, "high_limit": 38.81428571428571, "low_limit": 31.757142857142858, "adj_factor": 1, "volume": 1000000, "amount": 35000000},
+  {"trade_date": "2026-07-21", "ts_code": "SYNTH.SZ", "open": 35.285714285714285, "high": 35.285714285714285, "low": 35.285714285714285, "close": 35.285714285714285, "pre_close": 35.285714285714285, "high_limit": 38.81428571428571, "low_limit": 31.757142857142858, "adj_factor": 1, "volume": 1000000, "amount": 35000000}
+]

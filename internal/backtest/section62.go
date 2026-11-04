@@ -77,30 +77,32 @@ type FactorLayerResult struct {
 
 // LlmCoverageStats is §6.2 optional LLM coverage / degrade diagnostics.
 type LlmCoverageStats struct {
-	Available      bool          `json:"available"`
-	Note           string        `json:"note,omitempty"`
-	CoverageRate   OptionalFloat `json:"coverage_rate"`
-	DegradeCount   OptionalFloat `json:"degrade_count"`
-	AnnotateCalls  OptionalFloat `json:"annotate_calls"`
+	Available     bool          `json:"available"`
+	Note          string        `json:"note,omitempty"`
+	CoverageRate  OptionalFloat `json:"coverage_rate"`
+	DegradeCount  OptionalFloat `json:"degrade_count"`
+	AnnotateCalls OptionalFloat `json:"annotate_calls"`
 }
 
 // ExecutionSkipCounts are limit/suspend unfilled skips from the engine (when tracked).
 type ExecutionSkipCounts struct {
-	IntendedBuyOrders  int `json:"intended_buy_orders"`
-	IntendedSellOrders int `json:"intended_sell_orders"`
-	SkippedLimitBuy    int `json:"skipped_limit_buy"`
-	SkippedLimitSell   int `json:"skipped_limit_sell"`
-	SkippedSuspend     int `json:"skipped_suspend"`
+	IntendedBuyOrders   int `json:"intended_buy_orders"`
+	IntendedSellOrders  int `json:"intended_sell_orders"`
+	SkippedLimitBuy     int `json:"skipped_limit_buy"`
+	SkippedLimitSell    int `json:"skipped_limit_sell"`
+	SkippedSuspend      int `json:"skipped_suspend"`
+	SkippedMissingPrice int `json:"skipped_missing_price"`
+	SkippedMissingLimit int `json:"skipped_missing_limit"`
 }
 
 // DailyFactorPanel is one cross-section of processed factor scores + optional forward returns.
 // ForwardRet must be real next-period returns when present; never invent.
 type DailyFactorPanel struct {
-	TradeDate types.TradeDate
-	Quality   map[types.SecurityID]float64
-	Value     map[types.SecurityID]float64
-	Momentum  map[types.SecurityID]float64
-	Composite map[types.SecurityID]float64
+	TradeDate  types.TradeDate
+	Quality    map[types.SecurityID]float64
+	Value      map[types.SecurityID]float64
+	Momentum   map[types.SecurityID]float64
+	Composite  map[types.SecurityID]float64
 	ForwardRet map[types.SecurityID]float64 // optional; required for layer / long-short
 }
 
@@ -699,7 +701,7 @@ func ComputeUnfilledSkipRate(c *ExecutionSkipCounts) OptionalFloat {
 	if intended <= 0 {
 		return na("skip counts present but intended order total is 0")
 	}
-	skipped := c.SkippedLimitBuy + c.SkippedLimitSell + c.SkippedSuspend
+	skipped := c.SkippedLimitBuy + c.SkippedLimitSell + c.SkippedSuspend + c.SkippedMissingPrice + c.SkippedMissingLimit
 	return avail(float64(skipped) / float64(intended))
 }
 
@@ -707,10 +709,10 @@ func ComputeUnfilledSkipRate(c *ExecutionSkipCounts) OptionalFloat {
 func ComputeLlmCoverage(c *LlmRunCounters) LlmCoverageStats {
 	if c == nil {
 		return LlmCoverageStats{
-			Available:    false,
-			Note:         "LLM coverage/degrade N/A: LLM path disabled or counters not wired",
-			CoverageRate: na("no LLM counters"),
-			DegradeCount: na("no LLM counters"),
+			Available:     false,
+			Note:          "LLM coverage/degrade N/A: LLM path disabled or counters not wired",
+			CoverageRate:  na("no LLM counters"),
+			DegradeCount:  na("no LLM counters"),
 			AnnotateCalls: na("no LLM counters"),
 		}
 	}

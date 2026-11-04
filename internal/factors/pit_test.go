@@ -51,6 +51,29 @@ func TestStrictPITRejectsAnnounceEqualsPeriod(t *testing.T) {
 	}
 }
 
+func TestListFinancialGapsStrictListsProxyAndPeriodMismatch(t *testing.T) {
+	period := types.NewTradeDate(2023, 12, 31)
+	tSignal := types.NewTradeDate(2024, 6, 1)
+	proxy := types.FinancialRow{
+		TSCode: "600000.SH", ReportPeriod: period, AnnouncementDate: period,
+		AnnouncementIsProxy: true, NetProfit: 1, Revenue: 1, Equity: 1, TotalAssets: 1,
+	}
+	real := types.FinancialRow{
+		TSCode: "600000.SH", ReportPeriod: period, AnnouncementDate: types.NewTradeDate(2024, 3, 30),
+		NetProfit: 1, Revenue: 1, Equity: 1, TotalAssets: 1,
+	}
+	gaps := factors.ListFinancialGaps([]types.FinancialRow{proxy, real}, tSignal, true)
+	if len(gaps) != 1 {
+		t.Fatalf("strict must list the proxy row, gaps=%+v", gaps)
+	}
+	if !strings.Contains(gaps[0].Reason, "announcement_date≈report_period") {
+		t.Fatalf("reason %s", gaps[0].Reason)
+	}
+	if g2 := factors.ListFinancialGaps([]types.FinancialRow{real}, tSignal, true); len(g2) != 0 {
+		t.Fatalf("real NOTICE_DATE row is not a gap: %+v", g2)
+	}
+}
+
 func TestStrictPITFutureAnnouncementStillInvisible(t *testing.T) {
 	tSignal := types.NewTradeDate(2024, 2, 1)
 	row := types.FinancialRow{

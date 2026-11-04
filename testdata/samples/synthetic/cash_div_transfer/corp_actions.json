@@ -1,0 +1,14 @@
+[
+  {
+    "ts_code": "SYNTH.SZ",
+    "kind": "profit_distribution",
+    "announcement_date": "2026-07-10",
+    "record_date": "2026-07-16",
+    "ex_date": "2026-07-17",
+    "cash_pay_date": "2026-07-17",
+    "shares_tradable_date": "2026-07-17",
+    "cash_per_share": 0.60,
+    "bonus_ratio": 0.0,
+    "transfer_ratio": 0.40
+  }
+]

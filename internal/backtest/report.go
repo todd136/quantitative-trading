@@ -94,10 +94,11 @@ func BuildReportWithExtras(cfg config.Config, snaps []types.DailySnapshot, fills
 	order := make([]string, 0, len(split.Segments))
 	for _, b := range split.Segments {
 		segSnaps := FilterSnaps(snaps, b)
+		metricSnaps := FilterSnapsWithBaseline(snaps, b)
 		segFills := FilterFills(fills, b)
-		segBench := filterBench(bench, segSnaps)
+		segBench := filterBench(bench, metricSnaps)
 		min := MetricsInput{
-			Snaps:     segSnaps,
+			Snaps:     metricSnaps,
 			Fills:     segFills,
 			Benchmark: segBench,
 			RiskFree:  cfg.Backtest.RiskFree,
@@ -113,7 +114,7 @@ func BuildReportWithExtras(cfg config.Config, snaps []types.DailySnapshot, fills
 			sr.StartDate = segSnaps[0].TradeDate.String()
 			sr.EndDate = segSnaps[len(segSnaps)-1].TradeDate.String()
 		}
-		enrichSegment(&sr, min, extras, segSnaps)
+		enrichSegment(&sr, min, extras, metricSnaps)
 		key := string(b.Name)
 		r.Segments[key] = sr
 		order = append(order, key)

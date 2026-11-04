@@ -31,6 +31,31 @@ func AnnouncementUsable(row types.FinancialRow, t types.TradeDate, strict bool) 
 	return nil
 }
 
+// FinancialGap is a financial row that is unusable at signal date t (strict mode lists these).
+type FinancialGap struct {
+	TSCode           types.SecurityID
+	ReportPeriod     types.TradeDate
+	AnnouncementDate types.TradeDate
+	Reason           string
+}
+
+// ListFinancialGaps returns every row AnnouncementUsable rejects at t.
+// Report period ≠ announcement date: announce≈period proxies are listed in strict mode.
+func ListFinancialGaps(rows []types.FinancialRow, t types.TradeDate, strict bool) []FinancialGap {
+	var gaps []FinancialGap
+	for _, r := range rows {
+		if err := AnnouncementUsable(r, t, strict); err != nil {
+			gaps = append(gaps, FinancialGap{
+				TSCode:           r.TSCode,
+				ReportPeriod:     r.ReportPeriod,
+				AnnouncementDate: r.AnnouncementDate,
+				Reason:           err.Error(),
+			})
+		}
+	}
+	return gaps
+}
+
 // GetLatestFinancialPIT is GetLatestFinancial with an explicit strict-PIT switch.
 func GetLatestFinancialPIT(rows []types.FinancialRow, t types.TradeDate, strict bool) (types.FinancialRow, bool) {
 	var best types.FinancialRow

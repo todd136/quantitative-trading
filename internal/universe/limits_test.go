@@ -36,6 +36,14 @@ func TestEnsureLimitPrices(t *testing.T) {
 	}
 }
 
+func TestEnsureLimitPricesNoCloseFallback(t *testing.T) {
+	b := types.Bar{PreClose: 0, Close: 10.5}
+	universe.EnsureLimitPrices(&b, types.BoardSSEMain, false)
+	if b.HighLimit != 0 || b.LowLimit != 0 {
+		t.Fatalf("must not infer open limits from same-day close, got %+v", b)
+	}
+}
+
 func TestBuildUniverseSetsUnbuyableFromExecBars(t *testing.T) {
 	cfg := config.Default()
 	cfg.Universe.MinADV20 = 0

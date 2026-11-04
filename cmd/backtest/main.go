@@ -22,6 +22,31 @@ import (
 	"quantitative-trading/internal/universe"
 )
 
+func resolveCorpActionsPath(cfg config.Config) (path string, loaded bool, err error) {
+	cands := make([]string, 0, 3)
+	if strings.TrimSpace(cfg.Data.CorpActionsPath) != "" {
+		cands = append(cands, cfg.Data.CorpActionsPath)
+	}
+	if cfg.Data.FixtureDir != "" {
+		cands = append(cands, filepath.Join(cfg.Data.FixtureDir, "corp_actions.json"))
+	}
+	if cfg.Data.AKShareCacheDir != "" {
+		cands = append(cands, filepath.Join(cfg.Data.AKShareCacheDir, "corp_actions.json"))
+	}
+	for _, p := range cands {
+		if p == "" {
+			continue
+		}
+		if st, e := os.Stat(p); e == nil && !st.IsDir() {
+			return p, true, nil
+		}
+	}
+	if cfg.Data.StrictPIT {
+		return "", false, fmt.Errorf("strict PIT: corp-action records not loaded (missing file cannot default to no events; set data.corp_actions_path)")
+	}
+	return "", false, nil
+}
+
 func openProvider(cfg config.Config) (data.Provider, error) {
 	switch strings.ToLower(strings.TrimSpace(cfg.Data.Provider)) {
 	case "", "fixture":
@@ -238,11 +263,28 @@ func main() {
 
 	plugin := llm.NewPlugin(cfg.LLM) // Noop when disabled
 
+	corpPath, corpLoaded, corpErr := resolveCorpActionsPath(cfg)
+	if corpErr != nil {
+		fmt.Fprintf(os.Stderr, "corp actions: %v\n", corpErr)
+		os.Exit(1)
+	}
+	var corpActions []types.CorpAction
+	if corpLoaded {
+		corpActions, err = backtest.LoadCorpActionsFile(corpPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "corp actions: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Fprintf(os.Stderr, "corp actions: loaded %d event(s) from %s\n", len(corpActions), corpPath)
+	}
+
 	eng := &backtest.Engine{
-		Cfg:      cfg,
-		Calendar: cal,
-		CalIndex: calIndex,
-		Bars:     barsByCode,
+		Cfg:               cfg,
+		Calendar:          cal,
+		CalIndex:          calIndex,
+		Bars:              barsByCode,
+		CorpActions:       corpActions,
+		CorpActionsLoaded: corpLoaded,
 	}
 	state := &backtest.PortfolioState{Cash: cfg.Backtest.InitialCash}
 
@@ -279,6 +321,11 @@ func main() {
 			if ferr != nil {
 				if cfg.Data.StrictPIT {
 					return nil, fmt.Errorf("financials %s: %w", code, ferr)
+				}
+			}
+			if cfg.Data.StrictPIT {
+				for _, g := range factors.ListFinancialGaps(fins, t, true) {
+					fmt.Fprintf(os.Stderr, "strict PIT financial gap %s period=%s: %s\n", g.TSCode, g.ReportPeriod, g.Reason)
 				}
 			}
 			fin, ok := factors.GetLatestFinancialPIT(fins, t, cfg.Data.StrictPIT)

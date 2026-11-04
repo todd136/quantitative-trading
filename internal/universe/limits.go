@@ -20,8 +20,8 @@ func LimitUpDownPct(board types.Board, isST bool) float64 {
 }
 
 // EnsureLimitPrices fills HighLimit / LowLimit from PreClose×(1±pct) when absent.
-// Prefers PreClose; if PreClose<=0 falls back to Close. No-op when both limits
-// already set or no usable reference price.
+// Uses PreClose only — never same-day Close (that would leak T close into T open limits).
+// No-op when both limits already set or PreClose is unusable.
 func EnsureLimitPrices(b *types.Bar, board types.Board, isST bool) {
 	if b == nil {
 		return
@@ -30,9 +30,6 @@ func EnsureLimitPrices(b *types.Bar, board types.Board, isST bool) {
 		return
 	}
 	ref := b.PreClose
-	if ref <= 0 {
-		ref = b.Close
-	}
 	if ref <= 0 {
 		return
 	}

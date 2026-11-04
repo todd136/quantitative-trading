@@ -32,9 +32,9 @@ costs:
   stamp_tax_bps: 5
   slippage_bps: 5
 execution:
-  rolling_unfilled: true
+  rolling_unfilled: false
   volume_constraint_enabled: false
-  buy_limit_handler: "renormalize"
+  buy_limit_handler: "skip"
   lot_size: 100
 backtest:
   benchmark: "000300.SH"

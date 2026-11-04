@@ -100,11 +100,16 @@ func RunCalendar(
 		return nil, fmt.Errorf("bad window startIdx=%d endIdx=%d cal=%d", startIdx, endIdx, len(e.Calendar))
 	}
 	cfg := e.Cfg
+	if err := e.ValidateCorpActions(); err != nil {
+		return nil, err
+	}
 	var pending *pendingExec
 	snaps := make([]types.DailySnapshot, 0, endIdx-startIdx)
 
 	for i := startIdx; i < endIdx; i++ {
 		t := e.Calendar[i]
+
+		e.applyOpenCredits(state, t)
 
 		if pending != nil && pending.execDate.Equal(t) {
 			nextAvail, _ := e.NextTradeDate(t)
@@ -119,6 +124,7 @@ func RunCalendar(
 			return nil, fmt.Errorf("mark nav %s: %w", t, err)
 		}
 		snaps = append(snaps, snap)
+		e.captureRecordEntitlements(state, t)
 
 		if !portfolio.IsRebalanceDay(t, cfg.Portfolio.RebalanceFreq, cfg.Portfolio.RebalanceWeekday, e.Calendar, e.CalIndex) {
 			continue

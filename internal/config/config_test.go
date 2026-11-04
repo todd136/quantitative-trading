@@ -88,6 +88,27 @@ func TestMaxPerIndustry(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsUnimplementedExecutionOptions(t *testing.T) {
+	c := config.Default()
+	if c.Execution.RollingUnfilled || c.Execution.BuyLimitHandler != "skip" {
+		t.Fatalf("default execution must match implemented skip/keep-cash: %+v", c.Execution)
+	}
+	c.Execution.RollingUnfilled = true
+	if err := c.Validate(); err == nil {
+		t.Fatal("rolling_unfilled=true must error at config load")
+	}
+	c = config.Default()
+	c.Execution.VolumeConstraintEnabled = true
+	if err := c.Validate(); err == nil {
+		t.Fatal("volume_constraint_enabled=true must error")
+	}
+	c = config.Default()
+	c.Execution.BuyLimitHandler = "renormalize"
+	if err := c.Validate(); err == nil {
+		t.Fatal("buy_limit_handler=renormalize must error")
+	}
+}
+
 func TestIndustryAllowlistDefaultEmpty(t *testing.T) {
 	c := config.Default()
 	if len(c.Universe.IndustryAllowlist) != 0 {

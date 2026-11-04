@@ -170,11 +170,17 @@ func TestHaltMissingBarNoFakePnL(t *testing.T) {
 	if s0.NAV != s1.NAV || s1.NAV != s2.NAV {
 		t.Fatalf("halt gap must not invent PnL: d0=%v d1=%v d2=%v", s0.NAV, s1.NAV, s2.NAV)
 	}
-	if s1.HaltValued[code] != 10 {
-		t.Fatalf("halt mark want last close 10, got %v", s1.HaltValued)
+	if s1.HaltValued != nil {
+		t.Fatalf("missing bar without confirmed halt must not set HaltValued, got %v", s1.HaltValued)
 	}
-	if s2.HaltValued != nil {
-		t.Fatalf("resume should use live close, halt marks=%v", s2.HaltValued)
+	if s1.MissingValued[code] != 10 {
+		t.Fatalf("missing bar must carry last close on MissingValued, got %v", s1.MissingValued)
+	}
+	if s1.CarryMarks[code].Reason != backtest.CarryReasonMissingBar {
+		t.Fatalf("carry reason=%v", s1.CarryMarks[code])
+	}
+	if s2.HaltValued != nil || s2.MissingValued != nil {
+		t.Fatalf("resume should use live close, halt=%v missing=%v", s2.HaltValued, s2.MissingValued)
 	}
 }
 
@@ -238,7 +244,13 @@ func TestMissingBarSkipsFillAsHalt(t *testing.T) {
 	if state.Shares(code) != 0 {
 		t.Fatal("missing exec bar must not fill")
 	}
-	if eng.SkipCounts.IntendedBuyOrders != 1 || eng.SkipCounts.SkippedSuspend != 1 {
-		t.Fatalf("skip %+v", eng.SkipCounts)
+	if eng.SkipCounts.IntendedBuyOrders != 1 {
+		t.Fatalf("intended buy %+v", eng.SkipCounts)
+	}
+	if eng.SkipCounts.SkippedSuspend != 0 {
+		t.Fatalf("missing bar must not count as halt/suspend: %+v", eng.SkipCounts)
+	}
+	if eng.SkipCounts.SkippedMissingPrice != 1 {
+		t.Fatalf("missing bar skip want SkippedMissingPrice=1, got %+v", eng.SkipCounts)
 	}
 }

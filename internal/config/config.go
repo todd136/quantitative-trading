@@ -4,22 +4,23 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
 
 // Config is the root configuration for the A-share multifactor backtest.
 type Config struct {
-	Version    string           `yaml:"version"`
-	Market     MarketConfig     `yaml:"market"`
-	Universe   UniverseConfig   `yaml:"universe"`
-	Factors    FactorsConfig    `yaml:"factors"`
-	Processing ProcessingConfig `yaml:"processing"`
-	Portfolio  PortfolioConfig  `yaml:"portfolio"`
-	Signal     SignalConfig     `yaml:"signal"`
-	Costs      CostsConfig      `yaml:"costs"`
-	Execution  ExecutionConfig  `yaml:"execution"`
-	Backtest   BacktestConfig   `yaml:"backtest"`
+	Version     string            `yaml:"version"`
+	Market      MarketConfig      `yaml:"market"`
+	Universe    UniverseConfig    `yaml:"universe"`
+	Factors     FactorsConfig     `yaml:"factors"`
+	Processing  ProcessingConfig  `yaml:"processing"`
+	Portfolio   PortfolioConfig   `yaml:"portfolio"`
+	Signal      SignalConfig      `yaml:"signal"`
+	Costs       CostsConfig       `yaml:"costs"`
+	Execution   ExecutionConfig   `yaml:"execution"`
+	Backtest    BacktestConfig    `yaml:"backtest"`
 	LLM         LLMConfig         `yaml:"llm"`
 	Data        DataConfig        `yaml:"data"`
 	PaperExport PaperExportConfig `yaml:"paper_export"`
@@ -32,9 +33,9 @@ type MarketConfig struct {
 }
 
 type UniverseConfig struct {
-	MinListTradingDays  int      `yaml:"min_list_trading_days"`
-	MinADV20            float64  `yaml:"min_adv_20"`
-	MinADVValidDays     int      `yaml:"min_adv_valid_days"`
+	MinListTradingDays int     `yaml:"min_list_trading_days"`
+	MinADV20           float64 `yaml:"min_adv_20"`
+	MinADVValidDays    int     `yaml:"min_adv_valid_days"`
 	// IndustryAllowlist optionally restricts the investable universe to names whose
 	// PIT industry (Processing.IndustrySource, usually SW_L1) is in this set on the
 	// signal date. Empty/omitted → no industry filter (identical to prior behavior).
@@ -113,14 +114,14 @@ type WalkForwardConfig struct {
 }
 
 type BacktestConfig struct {
-	Benchmark    string            `yaml:"benchmark"`
-	RiskFree     float64           `yaml:"risk_free"`
-	InitialCash  float64           `yaml:"initial_cash"`
-	FloatTol     FloatTolConfig    `yaml:"float_tol"`
-	StartDate    string            `yaml:"start_date"`
-	EndDate      string            `yaml:"end_date"`
-	SampleSplit  SampleSplitConfig `yaml:"sample_split"`
-	WalkForward  WalkForwardConfig `yaml:"walk_forward"`
+	Benchmark   string            `yaml:"benchmark"`
+	RiskFree    float64           `yaml:"risk_free"`
+	InitialCash float64           `yaml:"initial_cash"`
+	FloatTol    FloatTolConfig    `yaml:"float_tol"`
+	StartDate   string            `yaml:"start_date"`
+	EndDate     string            `yaml:"end_date"`
+	SampleSplit SampleSplitConfig `yaml:"sample_split"`
+	WalkForward WalkForwardConfig `yaml:"walk_forward"`
 }
 
 type LLMFilterConfig struct {
@@ -182,6 +183,9 @@ type DataConfig struct {
 	// shortcuts, MV is a current snapshot stamped on history, or ST/industry
 	// records have no historical effective interval. Default false.
 	StrictPIT bool `yaml:"strict_pit"`
+	// CorpActionsPath is an optional JSON snapshot of corporate actions.
+	// Strict PIT refuses to default a missing file to "no events".
+	CorpActionsPath string `yaml:"corp_actions_path"`
 }
 
 // PaperExportConfig controls simulation / paper-trading target-list export.
@@ -235,9 +239,9 @@ func Default() Config {
 			SlippageBps:   5,
 		},
 		Execution: ExecutionConfig{
-			RollingUnfilled:         true,
+			RollingUnfilled:         false, // engine skips unfilled and keeps cash
 			VolumeConstraintEnabled: false,
-			BuyLimitHandler:         "renormalize",
+			BuyLimitHandler:         "skip", // unimplemented: renormalize / rolling
 			LotSize:                 100,
 		},
 		Backtest: BacktestConfig{
@@ -322,6 +326,18 @@ func (c Config) Validate() error {
 	}
 	if c.LLM.Enabled && c.LLM.Model.ModelID == "latest" {
 		return fmt.Errorf("llm.model.model_id must not be 'latest'")
+	}
+	if c.Execution.RollingUnfilled {
+		return fmt.Errorf("execution.rolling_unfilled is not implemented (engine skips unfilled and keeps cash); set rolling_unfilled: false")
+	}
+	if c.Execution.VolumeConstraintEnabled {
+		return fmt.Errorf("execution.volume_constraint_enabled is not implemented; set volume_constraint_enabled: false")
+	}
+	switch strings.TrimSpace(c.Execution.BuyLimitHandler) {
+	case "", "skip":
+		// implemented: skip limit-up buys, keep cash
+	default:
+		return fmt.Errorf("execution.buy_limit_handler=%q is not implemented (engine skips limit-up buys and keeps cash); set buy_limit_handler: skip", c.Execution.BuyLimitHandler)
 	}
 	ss := c.Backtest.SampleSplit
 	if ss.TrainEnd != "" || ss.ValEnd != "" {
