@@ -45,6 +45,15 @@ func TestLoadExampleYAML(t *testing.T) {
 	if c.Portfolio.N != 50 {
 		t.Fatalf("N=%d", c.Portfolio.N)
 	}
+	if c.Portfolio.IndustryCapRatio != 0.15 {
+		t.Fatalf("industry_cap_ratio=%v", c.Portfolio.IndustryCapRatio)
+	}
+	if c.Factors.Quality.Weight != 1 || c.Factors.Value.Weight != 1 || c.Factors.Momentum.Weight != 1 {
+		t.Fatalf("factor weights q/v/m=%v/%v/%v", c.Factors.Quality.Weight, c.Factors.Value.Weight, c.Factors.Momentum.Weight)
+	}
+	if !c.Data.StrictPIT {
+		t.Fatal("example.yaml formal fixture path should enable data.strict_pit")
+	}
 }
 
 func TestValidateLLMRequiresModelID(t *testing.T) {
@@ -76,6 +85,27 @@ func TestMaxPerIndustry(t *testing.T) {
 	// max(3, ceil(50*0.15)=8) = 8
 	if c.MaxPerIndustry() != 8 {
 		t.Fatalf("got %d", c.MaxPerIndustry())
+	}
+}
+
+func TestValidateRejectsUnimplementedExecutionOptions(t *testing.T) {
+	c := config.Default()
+	if c.Execution.RollingUnfilled || c.Execution.BuyLimitHandler != "skip" {
+		t.Fatalf("default execution must match implemented skip/keep-cash: %+v", c.Execution)
+	}
+	c.Execution.RollingUnfilled = true
+	if err := c.Validate(); err == nil {
+		t.Fatal("rolling_unfilled=true must error at config load")
+	}
+	c = config.Default()
+	c.Execution.VolumeConstraintEnabled = true
+	if err := c.Validate(); err == nil {
+		t.Fatal("volume_constraint_enabled=true must error")
+	}
+	c = config.Default()
+	c.Execution.BuyLimitHandler = "renormalize"
+	if err := c.Validate(); err == nil {
+		t.Fatal("buy_limit_handler=renormalize must error")
 	}
 }
 

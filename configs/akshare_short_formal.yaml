@@ -37,9 +37,9 @@ costs:
   stamp_tax_bps: 5
   slippage_bps: 5
 execution:
-  rolling_unfilled: true
+  rolling_unfilled: false
   volume_constraint_enabled: false
-  buy_limit_handler: "renormalize"
+  buy_limit_handler: "skip"
   lot_size: 100
 backtest:
   benchmark: "000300.SH"
@@ -61,6 +61,8 @@ data:
   akshare_python: ".venv/bin/python"
   akshare_helper: "scripts/akshare_fetch.py"
   akshare_cache_dir: "testdata/akshare_cache"
+  strict_pit: true             # fail-closed formal PIT (NOTICE_DATE financials, historical MV, no ST/industry backfill)
+  strict_quotes: true          # fail-closed unknown missing bars (independent of strict_pit)
   # First formal smoke: capped universe (40–100). Production uses date-window only.
   max_symbols: 60
 llm:

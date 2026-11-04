@@ -36,6 +36,14 @@ func TestEnsureLimitPrices(t *testing.T) {
 	}
 }
 
+func TestEnsureLimitPricesNoCloseFallback(t *testing.T) {
+	b := types.Bar{PreClose: 0, Close: 10.5}
+	universe.EnsureLimitPrices(&b, types.BoardSSEMain, false)
+	if b.HighLimit != 0 || b.LowLimit != 0 {
+		t.Fatalf("must not infer open limits from same-day close, got %+v", b)
+	}
+}
+
 func TestBuildUniverseSetsUnbuyableFromExecBars(t *testing.T) {
 	cfg := config.Default()
 	cfg.Universe.MinADV20 = 0
@@ -75,5 +83,15 @@ func TestBuildUniverseSetsUnbuyableFromExecBars(t *testing.T) {
 	}
 	if !univ[0].Unbuyable {
 		t.Fatal("expected Unbuyable from T+1 limit-up open")
+	}
+
+	// Signal-day selection must not consult T+1 bars: nil execBars ⇒ Unbuyable stays false
+	// even when the next session is limit-up in ctx.Bars.
+	univT := universe.BuildUniverse(uctx, td, nil)
+	if len(univT) != 1 {
+		t.Fatalf("univT=%d", len(univT))
+	}
+	if univT[0].Unbuyable {
+		t.Fatal("nil execBars must not leak T+1 limit-up into signal-day Unbuyable")
 	}
 }

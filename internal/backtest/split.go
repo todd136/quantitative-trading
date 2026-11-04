@@ -20,7 +20,9 @@ const (
 // SegmentBounds are inclusive/exclusive date bounds for a segment.
 // Train:  [Start, End]  (End = train_end inclusive)
 // Val:    (train_end, val_end]  → Start exclusive of train_end conceptually;
-//         we filter snaps with date > train_end && date <= val_end
+//
+//	we filter snaps with date > train_end && date <= val_end
+//
 // OOS:    (val_end, end] → date > val_end && date <= end
 type SegmentBounds struct {
 	Name      SegmentName
@@ -115,6 +117,35 @@ func FilterSnaps(snaps []types.DailySnapshot, b SegmentBounds) []types.DailySnap
 		}
 		out = append(out, s)
 	}
+	return out
+}
+
+// FilterSnapsWithBaseline is FilterSnaps plus the last snapshot on or before
+// Exclusive, so interval total return includes Exclusive→first-in-segment.
+// Example: 6/30=100, 7/1=90, 7/2=99 with Exclusive=6/30 → ~-1%, not +10%.
+func FilterSnapsWithBaseline(snaps []types.DailySnapshot, b SegmentBounds) []types.DailySnapshot {
+	seg := FilterSnaps(snaps, b)
+	if b.Exclusive.Time().IsZero() {
+		return seg
+	}
+	var base types.DailySnapshot
+	found := false
+	for _, s := range snaps {
+		if s.TradeDate.After(b.Exclusive) {
+			break
+		}
+		base = s
+		found = true
+	}
+	if !found {
+		return seg
+	}
+	if len(seg) > 0 && seg[0].TradeDate.Equal(base.TradeDate) {
+		return seg
+	}
+	out := make([]types.DailySnapshot, 0, len(seg)+1)
+	out = append(out, base)
+	out = append(out, seg...)
 	return out
 }
 

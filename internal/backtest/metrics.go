@@ -34,49 +34,55 @@ type Metrics struct {
 	NReturns int  `json:"n_returns"`
 
 	// Absolute performance (from NAV when HasCurve)
-	TotalReturn       OptionalFloat `json:"total_return"`
-	AnnReturn         OptionalFloat `json:"ann_return"` // (1+R)^(252/n)-1
-	AnnVol            OptionalFloat `json:"ann_vol"`
-	Sharpe            OptionalFloat `json:"sharpe"` // risk_free annual; default 0
-	MaxDrawdown       OptionalFloat `json:"max_drawdown"`
-	Calmar            OptionalFloat `json:"calmar"` // ann_return / |maxDD|; N/A if maxDD==0
-	DailyWinRate      OptionalFloat `json:"daily_win_rate"`
-	MonthlyWinRate    OptionalFloat `json:"monthly_win_rate"` // N/A if <2 calendar months
+	TotalReturn    OptionalFloat `json:"total_return"`
+	AnnReturn      OptionalFloat `json:"ann_return"` // (1+R)^(252/n)-1
+	AnnVol         OptionalFloat `json:"ann_vol"`
+	Sharpe         OptionalFloat `json:"sharpe"` // risk_free annual; default 0
+	MaxDrawdown    OptionalFloat `json:"max_drawdown"`
+	Calmar         OptionalFloat `json:"calmar"` // ann_return / |maxDD|; N/A if maxDD==0
+	DailyWinRate   OptionalFloat `json:"daily_win_rate"`
+	MonthlyWinRate OptionalFloat `json:"monthly_win_rate"` // N/A if <2 calendar months
 
 	// Turnover: DailySnapshot.Turnover treated as two-way (buy+sell notional / NAV).
 	// OneWay = TwoWay / 2. Annualized = daily avg × 252.
-	TurnoverDailyAvgTwoWay   OptionalFloat `json:"turnover_daily_avg_two_way"`
-	TurnoverDailyAvgOneWay   OptionalFloat `json:"turnover_daily_avg_one_way"`
-	TurnoverAnnTwoWay        OptionalFloat `json:"turnover_ann_two_way"`
-	TurnoverAnnOneWay        OptionalFloat `json:"turnover_ann_one_way"`
-	CostRatio                OptionalFloat `json:"cost_ratio"` // sum CostTotal / starting NAV
+	TurnoverDailyAvgTwoWay OptionalFloat `json:"turnover_daily_avg_two_way"`
+	TurnoverDailyAvgOneWay OptionalFloat `json:"turnover_daily_avg_one_way"`
+	TurnoverAnnTwoWay      OptionalFloat `json:"turnover_ann_two_way"`
+	TurnoverAnnOneWay      OptionalFloat `json:"turnover_ann_one_way"`
+	CostRatio              OptionalFloat `json:"cost_ratio"` // sum CostTotal / starting NAV
 
 	// Relative to benchmark (optional IndexBars)
-	ExcessReturn    OptionalFloat `json:"excess_return"`
-	TrackingError   OptionalFloat `json:"tracking_error"`
+	ExcessReturn     OptionalFloat `json:"excess_return"`
+	TrackingError    OptionalFloat `json:"tracking_error"`
 	InformationRatio OptionalFloat `json:"information_ratio"`
-	ExcessMaxDD     OptionalFloat `json:"excess_max_drawdown"`
+	ExcessMaxDD      OptionalFloat `json:"excess_max_drawdown"`
 
 	// Portfolio structure (from snaps when Weights/Holdings present)
-	AvgHoldingsCount   OptionalFloat `json:"avg_holdings_count"`
+	AvgHoldingsCount    OptionalFloat `json:"avg_holdings_count"`
 	MaxSingleNameWeight OptionalFloat `json:"max_single_name_weight"`
-	UnfilledSkipRate   OptionalFloat `json:"unfilled_skip_rate"` // N/A until engine tracks skips
+	UnfilledSkipRate    OptionalFloat `json:"unfilled_skip_rate"` // N/A until engine tracks skips
 
 	// Deferred §6.2 stubs (always N/A until implemented)
 	BrinsonAttribution OptionalFloat `json:"brinson_attribution"`
 	FactorLongShort    OptionalFloat `json:"factor_long_short"`
 	IndustryDistTS     OptionalFloat `json:"industry_distribution_ts"`
 
-	RiskFreeUsed float64 `json:"risk_free_used"`
-	AnnConvention string `json:"ann_convention"` // "252"
+	RiskFreeUsed  float64 `json:"risk_free_used"`
+	AnnConvention string  `json:"ann_convention"` // "252"
 }
 
 // MetricsInput bundles optional inputs for ComputeMetricsFull.
 type MetricsInput struct {
-	Snaps     []types.DailySnapshot
-	Fills     []types.Fill // optional; used only if snap Turnover/CostTotal empty
-	Benchmark []types.IndexBar
-	RiskFree  float64 // annual risk-free rate; default 0
+	Snaps []types.DailySnapshot
+	// Baseline is the last snapshot on or before an exclusive segment start.
+	// Used only for return-path construction (overnight into the first period day).
+	// Turnover, costs, NDays, and holdings structure use Snaps only.
+	Baseline *types.DailySnapshot
+	// ExpectBaseline marks exclusive segments that should have a pre-period NAV.
+	ExpectBaseline bool
+	Fills          []types.Fill // optional; used only if snap Turnover/CostTotal empty
+	Benchmark      []types.IndexBar
+	RiskFree       float64 // annual risk-free rate; default 0
 }
 
 // ComputeMetrics is the legacy thin wrapper (absolute curve only).
@@ -87,27 +93,37 @@ func ComputeMetrics(snaps []types.DailySnapshot, riskFree float64) Metrics {
 // ComputeMetricsFull derives §6.2 metrics. Missing inputs → Available=false, never fake zeros-as-results.
 func ComputeMetricsFull(in MetricsInput) Metrics {
 	m := Metrics{
-		RiskFreeUsed:  in.RiskFree,
-		AnnConvention: "252",
+		RiskFreeUsed:       in.RiskFree,
+		AnnConvention:      "252",
 		BrinsonAttribution: na("see segment attribution object; N/A until AttributionPeriods built from Weights+IndustryLookup+bars"),
 		FactorLongShort:    na("see segment factor_layers; N/A until DailyFactorPanel with ForwardRet provided"),
 		IndustryDistTS:     na("see segment industry_distribution; N/A until IndustryLookup + Weights provided"),
 		UnfilledSkipRate:   na("涨跌停/停牌未成交 skip rate N/A until ExecutionSkipCounts provided"),
 	}
-	snaps := in.Snaps
-	if len(snaps) < 2 {
+	period := in.Snaps
+	curve := period
+	if in.Baseline != nil {
+		curve = append([]types.DailySnapshot{*in.Baseline}, period...)
+	}
+	if len(curve) < 2 {
+		if in.ExpectBaseline && in.Baseline == nil {
+			m.TotalReturn = na("no valid pre-period baseline snapshot; exclusive-start overnight return is omitted")
+		}
 		return m
 	}
 	m.HasCurve = true
-	m.NDays = len(snaps)
-	m.NReturns = len(snaps) - 1
+	m.NDays = len(period)
+	m.NReturns = len(curve) - 1
 
-	first := snaps[0].NAV
-	last := snaps[len(snaps)-1].NAV
+	first := curve[0].NAV
+	last := curve[len(curve)-1].NAV
 	var totalRet float64
 	if first > 0 {
 		totalRet = last/first - 1
 		m.TotalReturn = avail(totalRet)
+		if in.ExpectBaseline && in.Baseline == nil {
+			m.TotalReturn.Note = "no valid pre-period baseline snapshot; return starts at first in-segment NAV"
+		}
 		// Annualize with 252 convention over number of daily return periods.
 		n := float64(m.NReturns)
 		if n > 0 && first > 0 && last > 0 {
@@ -120,12 +136,12 @@ func ComputeMetricsFull(in MetricsInput) Metrics {
 		m.AnnReturn = na("starting NAV <= 0")
 	}
 
-	rets := make([]float64, 0, len(snaps)-1)
-	peak := snaps[0].NAV
+	rets := make([]float64, 0, len(curve)-1)
+	peak := curve[0].NAV
 	maxDD := 0.0
 	posDays := 0
-	for i := 1; i < len(snaps); i++ {
-		prev, cur := snaps[i-1].NAV, snaps[i].NAV
+	for i := 1; i < len(curve); i++ {
+		prev, cur := curve[i-1].NAV, curve[i].NAV
 		if prev > 0 {
 			r := cur/prev - 1
 			rets = append(rets, r)
@@ -172,18 +188,21 @@ func ComputeMetricsFull(in MetricsInput) Metrics {
 		m.Calmar = na("ann_return unavailable")
 	}
 
-	m.MonthlyWinRate = monthlyWinRate(snaps)
+	m.MonthlyWinRate = monthlyWinRate(curve)
 
-	fillTurnoverCost(snaps, in.Fills, &m, first)
-	fillStructure(snaps, &m)
-	fillBenchmark(snaps, in.Benchmark, in.RiskFree, &m)
+	fillTurnoverCost(period, in.Fills, &m, first)
+	fillStructure(period, &m)
+	fillBenchmark(curve, in.Benchmark, in.RiskFree, &m)
 
 	return m
 }
 
 func monthlyWinRate(snaps []types.DailySnapshot) OptionalFloat {
 	// Aggregate NAV to calendar month-end (last snap in each YYYY-MM).
-	type monthKey struct{ y int; m time.Month }
+	type monthKey struct {
+		y int
+		m time.Month
+	}
 	order := make([]monthKey, 0)
 	lastNAV := map[monthKey]float64{}
 	seen := map[monthKey]bool{}

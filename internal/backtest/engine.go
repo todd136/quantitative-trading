@@ -2,6 +2,7 @@
 package backtest
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -13,11 +14,17 @@ import (
 	"quantitative-trading/internal/universe"
 )
 
+// ErrMissingPrice is returned when a holding must be valued or filled on a
+// normal trading day that has no usable price (not a halt carry).
+var ErrMissingPrice = errors.New("missing price on trading day")
+
 // PortfolioState is mutable book state during the backtest.
 type PortfolioState struct {
-	Cash  float64
-	Lots  []types.Lot // per-lot for T+1 availability
-	Fills []types.Fill
+	Cash         float64
+	Receivable   float64     // confirmed cash dividend not yet paid
+	Lots         []types.Lot // per-lot for T+1 availability
+	Fills        []types.Fill
+	Entitlements []Entitlement
 }
 
 // Shares returns total shares for code.
@@ -49,8 +56,30 @@ type Engine struct {
 	CalIndex map[string]int
 	// Bars[code][date] = bar
 	Bars map[types.SecurityID]map[string]types.Bar
-	// SkipCounts accumulates intended vs limit/suspend skips across ApplyTargets calls.
+	// Suspended[code][date] confirms an exchange halt independent of bar.Suspended.
+	Suspended map[types.SecurityID]map[string]bool
+	// CorpActions are loaded events. Empty slice with CorpActionsLoaded=true means
+	// "snapshot present, no events in window". Unloaded (false) cannot default to none.
+	CorpActions       []types.CorpAction
+	CorpActionsLoaded bool
+	// SkipCounts accumulates intended vs limit/suspend/missing skips across ApplyTargets calls.
 	SkipCounts ExecutionSkipCounts
+}
+
+func (e *Engine) isConfirmedHalt(code types.SecurityID, t types.TradeDate) bool {
+	if e == nil {
+		return false
+	}
+	if e.Suspended != nil {
+		if m := e.Suspended[code]; m != nil && m[t.String()] {
+			return true
+		}
+	}
+	if e.Bars == nil {
+		return false
+	}
+	bar, ok := e.Bars[code][t.String()]
+	return ok && bar.Suspended
 }
 
 // NextTradeDate returns the next calendar day after t, or false if none.
@@ -79,12 +108,17 @@ func (e *Engine) ApplyTargets(state *PortfolioState, execDate types.TradeDate, t
 		lotSize = 100
 	}
 
-	// mark-to-market NAV at open for sizing
-	nav := state.Cash
+	// mark-to-market NAV at open for sizing (halt/missing: last valid price; never drop holdings)
+	nav := state.Cash + state.Receivable
 	for _, l := range state.Lots {
-		if b, ok := e.Bars[l.TSCode][execDate.String()]; ok {
-			nav += l.Shares * b.Open
+		q, err := e.quoteOpen(l.TSCode, execDate)
+		if err != nil {
+			return fmt.Errorf("open nav %s %s: %w", l.TSCode, execDate, err)
 		}
+		if q.Missing && e.Cfg.Data.StrictQuotes {
+			return fmt.Errorf("%w: unknown missing quote %s on %s (strict_quotes; will not carry last close as a formal result)", ErrMissingPrice, l.TSCode, execDate)
+		}
+		nav += l.Shares * q.Price
 	}
 	if nav <= 0 {
 		return fmt.Errorf("nav non-positive on %s", execDate)
@@ -113,14 +147,25 @@ func (e *Engine) ApplyTargets(state *PortfolioState, execDate types.TradeDate, t
 	for _, code := range sorted {
 		tw := targetW[code]
 		curShares := state.Shares(code)
+		halt := e.isConfirmedHalt(code, execDate)
 		bar, ok := e.Bars[code][execDate.String()]
-		if !ok {
+		if halt || !ok || bar.Open <= 0 {
+			// Confirmed halt or missing K-line: never fill; keep the lot.
+			// Live bar with open<=0: alarm — forbid fill on a normal day without price.
+			if ok && !halt && bar.Open <= 0 && curShares > 0 {
+				return fmt.Errorf("%w: sell %s on %s (bar present, open<=0, not suspended)", ErrMissingPrice, code, execDate)
+			}
+			if curShares > 0 && tw == 0 && state.SellableShares(code, execDate) > 0 {
+				e.SkipCounts.IntendedSellOrders++
+				if halt {
+					e.SkipCounts.SkippedSuspend++
+				} else {
+					e.SkipCounts.SkippedMissingPrice++
+				}
+			}
 			continue
 		}
 		px := bar.Open
-		if px <= 0 {
-			continue
-		}
 		targetShares := math.Floor((tw*nav/px)/lotSize) * lotSize
 		if tw == 0 {
 			targetShares = 0
@@ -136,8 +181,11 @@ func (e *Engine) ApplyTargets(state *PortfolioState, execDate types.TradeDate, t
 		}
 		// Intended sell order (had sellable shares to reduce toward target).
 		e.SkipCounts.IntendedSellOrders++
-		if bar.Suspended {
-			e.SkipCounts.SkippedSuspend++
+		if bar.HighLimit <= 0 || bar.LowLimit <= 0 {
+			if e.Cfg.Data.StrictPIT {
+				return fmt.Errorf("strict: missing reliable open limit prices for sell %s on %s (will not infer from same-day close)", code, execDate)
+			}
+			e.SkipCounts.SkippedMissingLimit++
 			continue
 		}
 		if universe.CannotSellAtOpen(bar) {
@@ -175,14 +223,21 @@ func (e *Engine) ApplyTargets(state *PortfolioState, execDate types.TradeDate, t
 		if tw <= 0 {
 			continue
 		}
+		halt := e.isConfirmedHalt(code, execDate)
 		bar, ok := e.Bars[code][execDate.String()]
-		if !ok {
+		if halt || !ok || bar.Open <= 0 {
+			e.SkipCounts.IntendedBuyOrders++
+			if ok && !halt && bar.Open <= 0 {
+				return fmt.Errorf("%w: buy %s on %s (bar present, open<=0, not suspended)", ErrMissingPrice, code, execDate)
+			}
+			if halt {
+				e.SkipCounts.SkippedSuspend++
+			} else {
+				e.SkipCounts.SkippedMissingPrice++
+			}
 			continue
 		}
 		px := bar.Open
-		if px <= 0 {
-			continue
-		}
 		curShares := state.Shares(code)
 		targetShares := math.Floor((tw*nav/px)/lotSize) * lotSize
 		delta := targetShares - curShares
@@ -191,8 +246,11 @@ func (e *Engine) ApplyTargets(state *PortfolioState, execDate types.TradeDate, t
 		}
 		// Intended buy order (target weight above current).
 		e.SkipCounts.IntendedBuyOrders++
-		if bar.Suspended {
-			e.SkipCounts.SkippedSuspend++
+		if bar.HighLimit <= 0 || bar.LowLimit <= 0 {
+			if e.Cfg.Data.StrictPIT {
+				return fmt.Errorf("strict: missing reliable open limit prices for buy %s on %s (will not infer from same-day close)", code, execDate)
+			}
+			e.SkipCounts.SkippedMissingLimit++
 			continue
 		}
 		if universe.CannotBuyAtOpen(bar) {
@@ -261,33 +319,196 @@ func (p *PortfolioState) removeShares(code types.SecurityID, qty float64) {
 	p.Lots = newLots
 }
 
+// priceQuote is a valuation/exec price plus halt vs missing-bar provenance.
+type priceQuote struct {
+	Price   float64
+	Halt    bool // confirmed halt only
+	Missing bool // session bar missing, halt not confirmed
+	AsOf    types.TradeDate
+	Source  string
+	Reason  string
+}
+
+// lastValidBar walks the engine calendar backward for the latest bar with Close>0.
+func (e *Engine) lastValidBar(code types.SecurityID, asof types.TradeDate, inclusive bool) (types.Bar, bool) {
+	if e == nil || len(e.Calendar) == 0 {
+		return types.Bar{}, false
+	}
+	idx, ok := e.CalIndex[asof.String()]
+	if !ok {
+		idx = -1
+		for i := len(e.Calendar) - 1; i >= 0; i-- {
+			if !e.Calendar[i].After(asof) {
+				idx = i
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			return types.Bar{}, false
+		}
+	}
+	if !inclusive {
+		idx--
+	}
+	byDate := e.Bars[code]
+	if byDate == nil {
+		return types.Bar{}, false
+	}
+	for i := idx; i >= 0; i-- {
+		if b, ok := byDate[e.Calendar[i].String()]; ok && b.Close > 0 {
+			return b, true
+		}
+	}
+	return types.Bar{}, false
+}
+
+func (e *Engine) quoteClose(code types.SecurityID, t types.TradeDate) (priceQuote, error) {
+	halt := e.isConfirmedHalt(code, t)
+	bar, ok := e.Bars[code][t.String()]
+	if halt {
+		if ok && bar.Close > 0 {
+			return priceQuote{
+				Price: bar.Close, Halt: true, AsOf: t,
+				Source: CarrySourceSession, Reason: CarryReasonHalt,
+			}, nil
+		}
+		if prev, okp := e.lastValidBar(code, t, false); okp {
+			return priceQuote{
+				Price: prev.Close, Halt: true, AsOf: prev.TradeDate,
+				Source: CarrySourceLastClose, Reason: CarryReasonHalt,
+			}, nil
+		}
+		return priceQuote{}, fmt.Errorf("%w: halt %s on %s has no last valid close", ErrMissingPrice, code, t)
+	}
+	if ok {
+		if bar.Close > 0 {
+			return priceQuote{
+				Price: bar.Close, Halt: false, AsOf: t,
+				Source: CarrySourceSession,
+			}, nil
+		}
+		return priceQuote{}, fmt.Errorf("%w: %s on %s close<=0 (not suspended)", ErrMissingPrice, code, t)
+	}
+	// Missing session bar, halt not confirmed: still carry last close so NAV does
+	// not drop the holding, but do not classify the gap as a halt.
+	if prev, okp := e.lastValidBar(code, t, false); okp {
+		return priceQuote{
+			Price: prev.Close, Missing: true, AsOf: prev.TradeDate,
+			Source: CarrySourceLastClose, Reason: CarryReasonMissingBar,
+		}, nil
+	}
+	return priceQuote{}, fmt.Errorf("%w: %s on %s missing bar and no last valid close", ErrMissingPrice, code, t)
+}
+
+func (e *Engine) quoteOpen(code types.SecurityID, t types.TradeDate) (priceQuote, error) {
+	halt := e.isConfirmedHalt(code, t)
+	bar, ok := e.Bars[code][t.String()]
+	if halt {
+		if ok && bar.Open > 0 {
+			return priceQuote{
+				Price: bar.Open, Halt: true, AsOf: t,
+				Source: CarrySourceSession, Reason: CarryReasonHalt,
+			}, nil
+		}
+		if ok && bar.Close > 0 {
+			return priceQuote{
+				Price: bar.Close, Halt: true, AsOf: t,
+				Source: CarrySourceSession, Reason: CarryReasonHalt,
+			}, nil
+		}
+		if prev, okp := e.lastValidBar(code, t, false); okp {
+			return priceQuote{
+				Price: prev.Close, Halt: true, AsOf: prev.TradeDate,
+				Source: CarrySourceLastClose, Reason: CarryReasonHalt,
+			}, nil
+		}
+		return priceQuote{}, fmt.Errorf("%w: halt %s on %s has no last valid open", ErrMissingPrice, code, t)
+	}
+	if ok {
+		if bar.Open > 0 {
+			return priceQuote{
+				Price: bar.Open, Halt: false, AsOf: t,
+				Source: CarrySourceSession,
+			}, nil
+		}
+		return priceQuote{}, fmt.Errorf("%w: %s on %s open<=0 (not suspended)", ErrMissingPrice, code, t)
+	}
+	if prev, okp := e.lastValidBar(code, t, false); okp {
+		return priceQuote{
+			Price: prev.Close, Missing: true, AsOf: prev.TradeDate,
+			Source: CarrySourceLastClose, Reason: CarryReasonMissingBar,
+		}, nil
+	}
+	return priceQuote{}, fmt.Errorf("%w: %s on %s missing bar and no last valid open", ErrMissingPrice, code, t)
+}
+
 // MarkNAV builds end-of-day snapshot using close prices.
-func (e *Engine) MarkNAV(state *PortfolioState, t types.TradeDate) types.DailySnapshot {
+// Confirmed halt: last valid unadjusted close, flagged on HaltValued.
+// Missing bar (halt unconfirmed): last valid close on MissingValued — never drop the holding.
+// Normal session with close<=0: error.
+// NAV uses raw Close, not CloseAdj (corporate actions are booked as cash/shares).
+func (e *Engine) MarkNAV(state *PortfolioState, t types.TradeDate) (types.DailySnapshot, error) {
 	holdings := map[types.SecurityID]float64{}
-	equity := state.Cash
+	equity := state.Cash + state.Receivable
+	haltValued := map[types.SecurityID]float64{}
+	missingValued := map[types.SecurityID]float64{}
+	carryMarks := map[types.SecurityID]types.ValuationMark{}
 	for _, l := range state.Lots {
 		holdings[l.TSCode] += l.Shares
 	}
+	pxByCode := map[types.SecurityID]float64{}
 	for code, sh := range holdings {
-		if b, ok := e.Bars[code][t.String()]; ok {
-			equity += sh * b.Close
+		q, err := e.quoteClose(code, t)
+		if err != nil {
+			return types.DailySnapshot{}, fmt.Errorf("mark nav %s: %w", t, err)
+		}
+		if q.Missing && e.Cfg.Data.StrictQuotes {
+			return types.DailySnapshot{}, fmt.Errorf("%w: unknown missing quote %s on %s (strict_quotes; will not carry last close as a formal result)", ErrMissingPrice, code, t)
+		}
+		pxByCode[code] = q.Price
+		equity += sh * q.Price
+		if q.Halt {
+			haltValued[code] = q.Price
+		}
+		if q.Missing {
+			missingValued[code] = q.Price
+		}
+		if q.Halt || q.Missing {
+			carryMarks[code] = types.ValuationMark{
+				Price:  q.Price,
+				AsOf:   q.AsOf,
+				Source: q.Source,
+				Reason: q.Reason,
+			}
 		}
 	}
 	weights := map[types.SecurityID]float64{}
 	if equity > 0 {
 		for code, sh := range holdings {
-			if b, ok := e.Bars[code][t.String()]; ok {
-				weights[code] = sh * b.Close / equity
-			}
+			weights[code] = sh * pxByCode[code] / equity
 		}
 	}
-	return types.DailySnapshot{
-		TradeDate: t,
-		NAV:       equity,
-		Cash:      state.Cash,
-		Holdings:  holdings,
-		Weights:   weights,
+	if len(haltValued) == 0 {
+		haltValued = nil
 	}
+	if len(missingValued) == 0 {
+		missingValued = nil
+	}
+	if len(carryMarks) == 0 {
+		carryMarks = nil
+	}
+	return types.DailySnapshot{
+		TradeDate:     t,
+		NAV:           equity,
+		Cash:          state.Cash,
+		Receivable:    state.Receivable,
+		Holdings:      holdings,
+		Weights:       weights,
+		HaltValued:    haltValued,
+		MissingValued: missingValued,
+		CarryMarks:    carryMarks,
+	}, nil
 }
 
 // WriteSnapshots dumps NAV CSV under outDir (skeleton persistence).
@@ -301,11 +522,44 @@ func WriteSnapshots(outDir string, snaps []types.DailySnapshot) (string, error) 
 		return "", err
 	}
 	defer f.Close()
-	fmt.Fprintln(f, "trade_date,nav,cash")
+	fmt.Fprintln(f, "trade_date,nav,cash,receivable,halt_n,missing_n")
 	for _, s := range snaps {
-		fmt.Fprintf(f, "%s,%.6f,%.6f\n", s.TradeDate.String(), s.NAV, s.Cash)
+		fmt.Fprintf(f, "%s,%.6f,%.6f,%.6f,%d,%d\n",
+			s.TradeDate.String(), s.NAV, s.Cash, s.Receivable, len(s.HaltValued), len(s.MissingValued))
+	}
+	if err := writeValuationMarks(outDir, snaps); err != nil {
+		return path, err
 	}
 	return path, nil
+}
+
+func writeValuationMarks(outDir string, snaps []types.DailySnapshot) error {
+	path := filepath.Join(outDir, "valuation_marks.csv")
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	fmt.Fprintln(f, "trade_date,ts_code,price,as_of,source,reason,market_value,nav_weight")
+	for _, s := range snaps {
+		codes := make([]types.SecurityID, 0, len(s.CarryMarks))
+		for c := range s.CarryMarks {
+			codes = append(codes, c)
+		}
+		sort.Slice(codes, func(i, j int) bool { return codes[i] < codes[j] })
+		for _, c := range codes {
+			m := s.CarryMarks[c]
+			sh := s.Holdings[c]
+			mv := sh * m.Price
+			w := 0.0
+			if s.NAV > 0 {
+				w = mv / s.NAV
+			}
+			fmt.Fprintf(f, "%s,%s,%.6f,%s,%s,%s,%.6f,%.8f\n",
+				s.TradeDate.String(), c, m.Price, m.AsOf.String(), m.Source, m.Reason, mv, w)
+		}
+	}
+	return nil
 }
 
 // WriteFills dumps fills CSV.

@@ -18,6 +18,10 @@ var (
 
 	// ErrNotCached is returned when CacheDir is required but the object is missing.
 	ErrNotCached = errors.New("akshare: not found in cache")
+
+	// ErrStrictPIT is returned when strict PIT rejects announce≈period financials,
+	// snapshot market values, or backfilled ST/industry intervals.
+	ErrStrictPIT = errors.New("akshare: strict PIT rejected")
 )
 
 func wrapHelper(err error, detail string) error {

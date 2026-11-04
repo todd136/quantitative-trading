@@ -32,6 +32,7 @@ type Config struct {
 	SkipNetwork bool          // when true, never exec helper; cache-only or ErrSkipped
 	CacheDir    string        // optional directory of JSON blobs from prior fetches
 	CLITimeout  time.Duration // per helper subprocess; 0 => default 90s (prevents hung mv/financials/bars)
+	StrictPIT   bool          // fail-closed: reject announce≈period / snapshot MV / backfilled ST·industry
 }
 
 // Provider implements data.Provider using helper CLI and/or CacheDir.
@@ -159,6 +160,16 @@ func (p *Provider) readCache(key string) ([]byte, error) {
 }
 
 // loadJSON tries cache first, then helper (unless SkipNetwork).
+func (p *Provider) withStrict(args ...string) []string {
+	if p == nil || !p.cfg.StrictPIT {
+		return args
+	}
+	out := make([]string, 0, len(args)+1)
+	out = append(out, "--strict-pit")
+	out = append(out, args...)
+	return out
+}
+
 func (p *Provider) loadJSON(ctx context.Context, cacheKey string, helperArgs ...string) ([]byte, error) {
 	if b, err := p.readCache(cacheKey); err == nil {
 		return b, nil
@@ -339,7 +350,7 @@ func (p *Provider) Bars(tsCode types.SecurityID, from, to types.TradeDate) ([]ty
 		return nil, wrapHelper(nil, res.Error)
 	}
 
-	adjMap := map[string]float64{}
+	var adjRows []adjRowJSON
 	adjKey := "adj_" + string(tsCode)
 	// Date-scoped + CacheDir: use cached adj only — skip a second full-history
 	// network pull per symbol (bars carry adj_factor, defaulting to 1.0).
@@ -359,9 +370,7 @@ func (p *Provider) Bars(tsCode types.SecurityID, from, to types.TradeDate) ([]ty
 	if aerr == nil && len(adjRaw) > 0 {
 		var ar adjResult
 		if json.Unmarshal(adjRaw, &ar) == nil {
-			for _, r := range ar.Adj {
-				adjMap[r.TradeDate] = r.AdjFactor
-			}
+			adjRows = ar.Adj
 		}
 	} else if aerr != nil && aerr != ErrSkipped && aerr != ErrNotCached {
 		// Non-fatal: bars still usable with adj_factor from bar payload / 1.0
@@ -381,7 +390,7 @@ func (p *Provider) Bars(tsCode types.SecurityID, from, to types.TradeDate) ([]ty
 		if adj == 0 {
 			adj = 1
 		}
-		if v, ok := adjMap[b.TradeDate]; ok && v != 0 {
+		if v, ok := adjFactorAsOf(adjRows, b.TradeDate); ok {
 			adj = v
 		}
 		code := b.TSCode
@@ -403,6 +412,7 @@ func (p *Provider) Bars(tsCode types.SecurityID, from, to types.TradeDate) ([]ty
 			AdjFactor:   adj,
 			Suspended:   b.Suspended || b.Volume == 0,
 			LimitStatus: b.LimitStatus,
+			LimitSource: b.LimitSource,
 		}
 		// When helper omits official limits, fill conventional board bands from PreClose.
 		// ST status unknown here (no date-scoped ST join); use non-ST board pct.
@@ -414,16 +424,38 @@ func (p *Provider) Bars(tsCode types.SecurityID, from, to types.TradeDate) ([]ty
 	return out, nil
 }
 
+// adjFactorAsOf returns the last adj factor with trade_date <= date (never a future factor).
+func adjFactorAsOf(rows []adjRowJSON, date string) (float64, bool) {
+	best := ""
+	var val float64
+	found := false
+	for _, r := range rows {
+		if r.TradeDate == "" || r.AdjFactor == 0 || r.TradeDate > date {
+			continue
+		}
+		if !found || r.TradeDate > best {
+			best = r.TradeDate
+			val = r.AdjFactor
+			found = true
+		}
+	}
+	return val, found
+}
+
 // fillConventionalLimits sets High/LowLimit from PreClose×(1±pct) when missing.
+// Never uses same-day Close. Untrusted cached limits (no official source) are recomputed.
 func fillConventionalLimits(b *types.Bar, board types.Board, isST bool) {
-	if b.HighLimit > 0 && b.LowLimit > 0 {
+	if b == nil {
 		return
 	}
+	if b.LimitSource == "official" && b.HighLimit > 0 && b.LowLimit > 0 {
+		return
+	}
+	b.HighLimit = 0
+	b.LowLimit = 0
 	ref := b.PreClose
 	if ref <= 0 {
-		ref = b.Close
-	}
-	if ref <= 0 {
+		b.LimitSource = "none"
 		return
 	}
 	pct := 0.10
@@ -435,12 +467,9 @@ func fillConventionalLimits(b *types.Bar, board types.Board, isST bool) {
 			pct = 0.20
 		}
 	}
-	if b.HighLimit <= 0 {
-		b.HighLimit = ref * (1 + pct)
-	}
-	if b.LowLimit <= 0 {
-		b.LowLimit = ref * (1 - pct)
-	}
+	b.HighLimit = ref * (1 + pct)
+	b.LowLimit = ref * (1 - pct)
+	b.LimitSource = "pre_close"
 }
 
 // ST implements data.Provider (best-effort snapshot; may be empty with note in helper).
@@ -450,7 +479,7 @@ func fillConventionalLimits(b *types.Bar, board types.Board, isST bool) {
 // "today-ish", we rewrite entry_date to 1990-01-01 with an honest stderr note —
 // conservative: currently-ST names treated as ST for the full history.
 func (p *Provider) ST() ([]types.STRecord, error) {
-	raw, err := p.loadJSONRetry(context.Background(), 3, "st", "st")
+	raw, err := p.loadJSONRetry(context.Background(), 3, "st", p.withStrict("st")...)
 	if err != nil {
 		return nil, err
 	}
@@ -473,16 +502,25 @@ func (p *Provider) ST() ([]types.STRecord, error) {
 	today := time.Now().In(time.FixedZone("CST", 8*3600)).Format("2006-01-02")
 	out := make([]types.STRecord, 0, len(res.Records))
 	rewrote := 0
+	nBackfill := 0
 	for _, r := range res.Records {
 		if IsBSE(r.TSCode) {
 			continue
 		}
 		ed, err := parseDate(r.EntryDate)
 		if err != nil {
+			if p.cfg.StrictPIT {
+				return nil, fmt.Errorf("%w: ST %s entry_date: %v", ErrStrictPIT, r.TSCode, err)
+			}
 			return nil, err
 		}
-		// Rewrite fetch-day / missing historical entry so live backtests filter ST.
-		if snapshot || r.EntryDate == today || r.EntryDate == "" {
+		backfill := r.PITBackfill || r.IsSnapshot || snapshot || r.EntryDate == today || r.EntryDate == "" || ed.Equal(epoch)
+		if backfill && p.cfg.StrictPIT {
+			nBackfill++
+			continue
+		}
+		// Non-strict: rewrite fetch-day / missing historical entry so live backtests filter ST.
+		if backfill {
 			ed = epoch
 			rewrote++
 		}
@@ -491,11 +529,15 @@ func (p *Provider) ST() ([]types.STRecord, error) {
 			return nil, err
 		}
 		out = append(out, types.STRecord{
-			TSCode:     types.SecurityID(r.TSCode),
-			EntryDate:  ed,
-			RemoveDate: rd,
-			STType:     r.STType,
+			TSCode:      types.SecurityID(r.TSCode),
+			EntryDate:   ed,
+			RemoveDate:  rd,
+			STType:      r.STType,
+			PITBackfill: backfill,
 		})
+	}
+	if p.cfg.StrictPIT && (nBackfill > 0 || (snapshot && len(res.Records) > 0 && len(out) == 0)) {
+		return nil, fmt.Errorf("%w: ST snapshot has no historical entry/remove intervals (dropped %d)", ErrStrictPIT, nBackfill)
 	}
 	if rewrote > 0 {
 		fmt.Fprintf(os.Stderr,
@@ -511,7 +553,7 @@ func (p *Provider) ST() ([]types.STRecord, error) {
 
 // Industry implements data.Provider (best-effort).
 func (p *Provider) Industry() ([]types.IndustryRecord, error) {
-	raw, err := p.loadJSONRetry(context.Background(), 3, "industry", "industry")
+	raw, err := p.loadJSONRetry(context.Background(), 3, "industry", p.withStrict("industry")...)
 	if err != nil {
 		return nil, err
 	}
@@ -535,6 +577,9 @@ func (p *Provider) Industry() ([]types.IndustryRecord, error) {
 		}
 		ed, err := parseDate(r.EffectiveDate)
 		if err != nil {
+			if p.cfg.StrictPIT {
+				continue
+			}
 			// tolerate missing — use epoch; helper notes the gap
 			ed, _ = types.ParseTradeDate("2000-01-01")
 		}
@@ -546,6 +591,10 @@ func (p *Provider) Industry() ([]types.IndustryRecord, error) {
 		if src == "" {
 			src = "SW_L1"
 		}
+		backfill := r.PITBackfill || ed.Equal(types.NewTradeDate(2000, 1, 1))
+		if backfill && p.cfg.StrictPIT {
+			continue
+		}
 		out = append(out, types.IndustryRecord{
 			TSCode:        types.SecurityID(r.TSCode),
 			IndustryCode:  r.IndustryCode,
@@ -553,7 +602,11 @@ func (p *Provider) Industry() ([]types.IndustryRecord, error) {
 			EffectiveDate: ed,
 			ExpireDate:    xd,
 			Source:        src,
+			PITBackfill:   backfill,
 		})
+	}
+	if p.cfg.StrictPIT && len(res.Records) > 0 && len(out) == 0 {
+		return nil, fmt.Errorf("%w: industry membership is a current snapshot (no historical effective/expire)", ErrStrictPIT)
 	}
 	if len(out) == 0 {
 		fmt.Fprintf(os.Stderr, "akshare industry: empty membership (note=%q)\n", res.Note)
@@ -566,7 +619,7 @@ func (p *Provider) Industry() ([]types.IndustryRecord, error) {
 // never surface fabricated zeros as valid fundamentals for Quality/Value.
 func (p *Provider) Financials(tsCode types.SecurityID) ([]types.FinancialRow, error) {
 	key := "financials_" + string(tsCode)
-	raw, err := p.loadJSON(context.Background(), key, "financials", "--symbol", string(tsCode))
+	raw, err := p.loadJSON(context.Background(), key, p.withStrict("financials", "--symbol", string(tsCode))...)
 	if err != nil {
 		return nil, err
 	}
@@ -593,33 +646,45 @@ func (p *Provider) Financials(tsCode types.SecurityID) ([]types.FinancialRow, er
 			skippedInvalid++
 			continue
 		}
-		ad := rp
-		annIsProxy := true
+		annIsProxy := r.AnnouncementIsProxy != nil && *r.AnnouncementIsProxy
+		var ad types.TradeDate
 		if r.AnnouncementDate != "" {
 			if d, err := parseDate(r.AnnouncementDate); err == nil {
 				ad = d
-				if !d.Equal(rp) {
-					annIsProxy = false
+				if d.Equal(rp) {
+					annIsProxy = true
 				}
+			} else {
+				annIsProxy = true
 			}
+		} else {
+			annIsProxy = true
 		}
 		if annIsProxy {
-			// Honest PIT gap: abstract path often sets announcement_date≈report_period.
-			// We do NOT invent a lag / fake NOTICE_DATE; GetLatestFinancial uses this as-is.
 			annProxy++
+			if p.cfg.StrictPIT {
+				continue // fail-closed: never feed announce≈period into formal results
+			}
+			if ad.Time().IsZero() {
+				ad = rp // non-strict: keep legacy visibility, flagged as proxy
+			}
+		}
+		if ad.Time().IsZero() {
+			continue
 		}
 		out = append(out, types.FinancialRow{
-			TSCode:           types.SecurityID(r.TSCode),
-			ReportPeriod:     rp,
-			AnnouncementDate: ad,
-			NetProfit:        r.NetProfit,
-			Revenue:          r.Revenue,
-			GrossProfit:      r.GrossProfit,
-			TotalAssets:      r.TotalAssets,
-			TotalLiabilities: r.TotalLiabilities,
-			Equity:           r.Equity,
-			OperatingCF:      r.OperatingCF,
-			StatementType:    r.StatementType,
+			TSCode:              types.SecurityID(r.TSCode),
+			ReportPeriod:        rp,
+			AnnouncementDate:    ad,
+			NetProfit:           r.NetProfit,
+			Revenue:             r.Revenue,
+			GrossProfit:         r.GrossProfit,
+			TotalAssets:         r.TotalAssets,
+			TotalLiabilities:    r.TotalLiabilities,
+			Equity:              r.Equity,
+			OperatingCF:         r.OperatingCF,
+			StatementType:       r.StatementType,
+			AnnouncementIsProxy: annIsProxy,
 		})
 	}
 	if skippedInvalid > 0 {
@@ -631,7 +696,10 @@ func (p *Provider) Financials(tsCode types.SecurityID) ([]types.FinancialRow, er
 		fmt.Fprintf(os.Stderr,
 			"akshare financials %s: %d/%d rows have announcement_date≈report_period "+
 				"(no true NOTICE_DATE; not inventing announcement lag)\n",
-			tsCode, annProxy, len(out))
+			tsCode, annProxy, len(out)+annProxy)
+	}
+	if p.cfg.StrictPIT && annProxy > 0 && len(out) == 0 {
+		return nil, fmt.Errorf("%w: financials %s only announce≈period rows", ErrStrictPIT, tsCode)
 	}
 	return out, nil
 }
@@ -643,7 +711,7 @@ func (p *Provider) MarketValues(tsCode types.SecurityID, from, to types.TradeDat
 	// stock_value_em); filter to [from,to] here. Passing T,T into the helper would
 	// poison the cache with a single day and break later signal dates.
 	key := "mv_" + string(tsCode)
-	args := []string{"mv", "--symbol", string(tsCode)}
+	args := p.withStrict("mv", "--symbol", string(tsCode))
 	raw, err := p.loadJSON(context.Background(), key, args...)
 	if err != nil {
 		return nil, err
@@ -660,7 +728,19 @@ func (p *Provider) MarketValues(tsCode types.SecurityID, from, to types.TradeDat
 	}
 	out := make([]types.MarketValue, 0, len(res.Values))
 	skipped := 0
+	nSnapshot := 0
+	src := res.Source
+	snapshotSrc := strings.Contains(src, "stock_individual_info_em") ||
+		strings.Contains(strings.ToLower(res.Note), "snapshot")
 	for _, m := range res.Values {
+		isSnap := m.IsSnapshot || snapshotSrc
+		if isSnap {
+			nSnapshot++
+			if p.cfg.StrictPIT {
+				continue
+			}
+			continue // never stamp a current snapshot onto history
+		}
 		d, err := parseDate(m.TradeDate)
 		if err != nil {
 			continue
@@ -679,10 +759,14 @@ func (p *Provider) MarketValues(tsCode types.SecurityID, from, to types.TradeDat
 			FloatShare: m.FloatShare,
 			TotalMV:    m.TotalMV,
 			FloatMV:    m.FloatMV,
+			Source:     src,
 		})
 	}
 	if skipped > 0 {
 		fmt.Fprintf(os.Stderr, "akshare mv %s: skipped %d rows with total_mv<=0\n", tsCode, skipped)
+	}
+	if p.cfg.StrictPIT && nSnapshot > 0 && len(out) == 0 {
+		return nil, fmt.Errorf("%w: market value %s is a current snapshot (no historical series)", ErrStrictPIT, tsCode)
 	}
 	return out, nil
 }

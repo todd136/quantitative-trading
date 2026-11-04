@@ -8,33 +8,13 @@ import (
 
 // MarketValueAsOf returns the latest TotalMV with trade_date ≤ asof within
 // lookbackCalendarDays (inclusive window [asof-lookback, asof]).
-// Missing / non-positive MV → ok=false (never treat 0 as valid).
+// Missing / non-positive / snapshot / undated MV → ok=false (never treat 0 as valid).
 func MarketValueAsOf(rows []types.MarketValue, asof types.TradeDate, lookbackCalendarDays int) (float64, bool) {
-	if lookbackCalendarDays < 0 {
-		lookbackCalendarDays = 0
-	}
-	var best types.MarketValue
-	found := false
-	earliest := types.TradeDate(asof.Time().AddDate(0, 0, -lookbackCalendarDays))
-	for _, r := range rows {
-		if r.TotalMV <= 0 {
-			continue
-		}
-		if r.TradeDate.After(asof) {
-			continue
-		}
-		if r.TradeDate.Before(earliest) {
-			continue
-		}
-		if !found || r.TradeDate.After(best.TradeDate) {
-			best = r
-			found = true
-		}
-	}
-	if !found {
+	mv, err := MarketValueAsOfPIT(rows, asof, lookbackCalendarDays, false)
+	if err != nil {
 		return 0, false
 	}
-	return best.TotalMV, true
+	return mv, true
 }
 
 // ForwardCloseReturn computes close-to-close return from fromDate to toDate

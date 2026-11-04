@@ -52,6 +52,7 @@ type barJSON struct {
 	AdjFactor   float64 `json:"adj_factor"`
 	Suspended   bool    `json:"suspended"`
 	LimitStatus string  `json:"limit_status"`
+	LimitSource string  `json:"limit_source"`
 }
 
 type barsResult struct {
@@ -75,10 +76,12 @@ type adjResult struct {
 }
 
 type stJSON struct {
-	TSCode     string  `json:"ts_code"`
-	EntryDate  string  `json:"entry_date"`
-	RemoveDate *string `json:"remove_date"`
-	STType     string  `json:"st_type"`
+	TSCode      string  `json:"ts_code"`
+	EntryDate   string  `json:"entry_date"`
+	RemoveDate  *string `json:"remove_date"`
+	STType      string  `json:"st_type"`
+	IsSnapshot  bool    `json:"is_snapshot"`
+	PITBackfill bool    `json:"pit_backfill"`
 }
 
 type recordsResult struct {
@@ -95,6 +98,7 @@ type industryJSON struct {
 	EffectiveDate string  `json:"effective_date"`
 	ExpireDate    *string `json:"expire_date"`
 	Source        string  `json:"source"`
+	PITBackfill   bool    `json:"pit_backfill"`
 }
 
 type industryResult struct {
@@ -105,17 +109,18 @@ type industryResult struct {
 }
 
 type financialJSON struct {
-	TSCode           string  `json:"ts_code"`
-	ReportPeriod     string  `json:"report_period"`
-	AnnouncementDate string  `json:"announcement_date"`
-	NetProfit        float64 `json:"net_profit"`
-	Revenue          float64 `json:"revenue"`
-	GrossProfit      float64 `json:"gross_profit"`
-	TotalAssets      float64 `json:"total_assets"`
-	TotalLiabilities float64 `json:"total_liabilities"`
-	Equity           float64 `json:"equity"`
-	OperatingCF      float64 `json:"operating_cf"`
-	StatementType    string  `json:"statement_type"`
+	TSCode              string  `json:"ts_code"`
+	ReportPeriod        string  `json:"report_period"`
+	AnnouncementDate    string  `json:"announcement_date"`
+	AnnouncementIsProxy *bool   `json:"announcement_is_proxy"`
+	NetProfit           float64 `json:"net_profit"`
+	Revenue             float64 `json:"revenue"`
+	GrossProfit         float64 `json:"gross_profit"`
+	TotalAssets         float64 `json:"total_assets"`
+	TotalLiabilities    float64 `json:"total_liabilities"`
+	Equity              float64 `json:"equity"`
+	OperatingCF         float64 `json:"operating_cf"`
+	StatementType       string  `json:"statement_type"`
 }
 
 type financialsResult struct {
@@ -133,6 +138,7 @@ type mvJSON struct {
 	FloatShare float64 `json:"float_share"`
 	TotalMV    float64 `json:"total_mv"`
 	FloatMV    float64 `json:"float_mv"`
+	IsSnapshot bool    `json:"is_snapshot"`
 }
 
 type mvResult struct {

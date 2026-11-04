@@ -51,20 +51,22 @@ func ParseTradeDate(s string) (TradeDate, error) {
 
 // Bar is one day of OHLCV + limit / suspend flags.
 type Bar struct {
-	TradeDate  TradeDate
-	TSCode     SecurityID
-	Open       float64
-	High       float64
-	Low        float64
-	Close      float64
-	Volume     float64
-	Amount     float64 // CNY
-	PreClose   float64
-	HighLimit  float64
-	LowLimit   float64
-	AdjFactor  float64
-	Suspended  bool
+	TradeDate   TradeDate
+	TSCode      SecurityID
+	Open        float64
+	High        float64
+	Low         float64
+	Close       float64
+	Volume      float64
+	Amount      float64 // CNY
+	PreClose    float64
+	HighLimit   float64
+	LowLimit    float64
+	AdjFactor   float64
+	Suspended   bool
 	LimitStatus string // optional vendor enum
+	// LimitSource is official | pre_close | none. Empty on old caches is treated as untrusted.
+	LimitSource string
 }
 
 // CloseAdj returns close * adj_factor.
@@ -90,6 +92,9 @@ type STRecord struct {
 	EntryDate  TradeDate
 	RemoveDate *TradeDate // nil = still ST
 	STType     string
+	// PITBackfill is true when entry_date was stamped (e.g. 1990-01-01) because
+	// the vendor only provided a current ST snapshot. Strict PIT rejects these.
+	PITBackfill bool
 }
 
 // IndustryRecord is point-in-time industry membership.
@@ -100,6 +105,9 @@ type IndustryRecord struct {
 	EffectiveDate TradeDate
 	ExpireDate    *TradeDate
 	Source        string // SW_L1 / CITIC_L1
+	// PITBackfill is true when effective_date was stamped without a historical
+	// membership interval. Strict PIT rejects these.
+	PITBackfill bool
 }
 
 // FinancialRow is one financial statement snapshot keyed by announcement date.
@@ -115,6 +123,9 @@ type FinancialRow struct {
 	Equity           float64
 	OperatingCF      float64
 	StatementType    string // consolidated default
+	// AnnouncementIsProxy is true when announcement_date was filled with report_period
+	// (or otherwise invented). Strict PIT must reject these rows.
+	AnnouncementIsProxy bool
 }
 
 // MarketValue is daily market-cap / share data.
@@ -125,6 +136,10 @@ type MarketValue struct {
 	FloatShare float64
 	TotalMV    float64
 	FloatMV    float64
+	// IsSnapshot marks a current-day quote stamped onto a historical date.
+	// Strict PIT must reject these; even non-strict lookup skips them.
+	IsSnapshot bool
+	Source     string
 }
 
 // IndexBar is benchmark EOD.
@@ -159,10 +174,10 @@ type TargetHolding struct {
 
 // Lot tracks T+1 available quantity.
 type Lot struct {
-	TSCode       SecurityID
-	Shares       float64
+	TSCode        SecurityID
+	Shares        float64
 	AvailableFrom TradeDate // earliest sell date (next trading day after buy)
-	CostBasis    float64
+	CostBasis     float64
 }
 
 // Fill is an executed trade.
@@ -176,15 +191,49 @@ type Fill struct {
 	Cost      float64 // commission + stamp + slippage
 }
 
+// ValuationMark records how a holding was priced when the session close was not used.
+type ValuationMark struct {
+	Price  float64
+	AsOf   TradeDate // date of the price that was carried
+	Source string    // session_close | last_close
+	Reason string    // confirmed_halt | missing_bar
+}
+
 // DailySnapshot is end-of-day portfolio state for persistence.
 type DailySnapshot struct {
-	TradeDate   TradeDate
-	NAV         float64
-	Cash        float64
-	Holdings    map[SecurityID]float64 // shares
-	Weights     map[SecurityID]float64
-	Turnover    float64
-	CostTotal   float64
+	TradeDate TradeDate
+	NAV       float64
+	Cash      float64
+	// Receivable is confirmed cash dividend not yet paid (ex-date through cash-pay date).
+	Receivable float64
+	Holdings   map[SecurityID]float64 // shares
+	Weights    map[SecurityID]float64
+	Turnover   float64
+	CostTotal  float64
+	// HaltValued lists holdings marked to last valid price because the name was
+	// a confirmed halt (bar.Suspended or suspend calendar). Empty when none.
+	HaltValued map[SecurityID]float64
+	// MissingValued lists holdings marked to last valid price because the session
+	// bar is missing and halt was not confirmed. Distinct from HaltValued.
+	MissingValued map[SecurityID]float64
+	// CarryMarks is the per-name audit trail (price / as-of / source / reason).
+	CarryMarks map[SecurityID]ValuationMark
+}
+
+// CorpAction is one announced corporate action. Dates are calendar dates (not inferred
+// from adj_factor). Kind must be a supported enumerator or the engine fail-closes.
+type CorpAction struct {
+	TSCode             SecurityID
+	Kind               string // profit_distribution | cash_dividend | bonus_share | capital_transfer | unsupported
+	AnnouncementDate   TradeDate
+	RecordDate         TradeDate // 股权登记日
+	ExDate             TradeDate // 除权除息日
+	CashPayDate        TradeDate // 现金红利发放日; zero → same as ExDate
+	SharesTradableDate TradeDate // 新增股份上市/可交易日; zero → same as ExDate
+	CashPerShare       float64   // 税前每股派现
+	BonusRatio         float64   // 每股送股
+	TransferRatio      float64   // 每股转增
+	UnsupportedReason  string
 }
 
 // PublicText is a publicly available text document for optional LLM assist (PIT via AsofTS).
@@ -199,14 +248,14 @@ type PublicText struct {
 
 // LlmFeature is the auditable LLM plugin output schema (§9.5).
 type LlmFeature struct {
-	TSCode          SecurityID
-	SignalDate      TradeDate
-	SentimentScore  *float64
-	EventTags       []string
-	Confidence      float64
-	SourceIDs       []string
-	AsofTS          time.Time
-	ModelID         string
-	PromptVersion   string
-	CacheKey        string
+	TSCode         SecurityID
+	SignalDate     TradeDate
+	SentimentScore *float64
+	EventTags      []string
+	Confidence     float64
+	SourceIDs      []string
+	AsofTS         time.Time
+	ModelID        string
+	PromptVersion  string
+	CacheKey       string
 }
