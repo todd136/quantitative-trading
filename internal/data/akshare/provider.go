@@ -350,7 +350,7 @@ func (p *Provider) Bars(tsCode types.SecurityID, from, to types.TradeDate) ([]ty
 		return nil, wrapHelper(nil, res.Error)
 	}
 
-	adjMap := map[string]float64{}
+	var adjRows []adjRowJSON
 	adjKey := "adj_" + string(tsCode)
 	// Date-scoped + CacheDir: use cached adj only — skip a second full-history
 	// network pull per symbol (bars carry adj_factor, defaulting to 1.0).
@@ -370,9 +370,7 @@ func (p *Provider) Bars(tsCode types.SecurityID, from, to types.TradeDate) ([]ty
 	if aerr == nil && len(adjRaw) > 0 {
 		var ar adjResult
 		if json.Unmarshal(adjRaw, &ar) == nil {
-			for _, r := range ar.Adj {
-				adjMap[r.TradeDate] = r.AdjFactor
-			}
+			adjRows = ar.Adj
 		}
 	} else if aerr != nil && aerr != ErrSkipped && aerr != ErrNotCached {
 		// Non-fatal: bars still usable with adj_factor from bar payload / 1.0
@@ -392,7 +390,7 @@ func (p *Provider) Bars(tsCode types.SecurityID, from, to types.TradeDate) ([]ty
 		if adj == 0 {
 			adj = 1
 		}
-		if v, ok := adjMap[b.TradeDate]; ok && v != 0 {
+		if v, ok := adjFactorAsOf(adjRows, b.TradeDate); ok {
 			adj = v
 		}
 		code := b.TSCode
@@ -414,6 +412,7 @@ func (p *Provider) Bars(tsCode types.SecurityID, from, to types.TradeDate) ([]ty
 			AdjFactor:   adj,
 			Suspended:   b.Suspended || b.Volume == 0,
 			LimitStatus: b.LimitStatus,
+			LimitSource: b.LimitSource,
 		}
 		// When helper omits official limits, fill conventional board bands from PreClose.
 		// ST status unknown here (no date-scoped ST join); use non-ST board pct.
@@ -425,16 +424,38 @@ func (p *Provider) Bars(tsCode types.SecurityID, from, to types.TradeDate) ([]ty
 	return out, nil
 }
 
+// adjFactorAsOf returns the last adj factor with trade_date <= date (never a future factor).
+func adjFactorAsOf(rows []adjRowJSON, date string) (float64, bool) {
+	best := ""
+	var val float64
+	found := false
+	for _, r := range rows {
+		if r.TradeDate == "" || r.AdjFactor == 0 || r.TradeDate > date {
+			continue
+		}
+		if !found || r.TradeDate > best {
+			best = r.TradeDate
+			val = r.AdjFactor
+			found = true
+		}
+	}
+	return val, found
+}
+
 // fillConventionalLimits sets High/LowLimit from PreClose×(1±pct) when missing.
+// Never uses same-day Close. Untrusted cached limits (no official source) are recomputed.
 func fillConventionalLimits(b *types.Bar, board types.Board, isST bool) {
-	if b.HighLimit > 0 && b.LowLimit > 0 {
+	if b == nil {
 		return
 	}
+	if b.LimitSource == "official" && b.HighLimit > 0 && b.LowLimit > 0 {
+		return
+	}
+	b.HighLimit = 0
+	b.LowLimit = 0
 	ref := b.PreClose
 	if ref <= 0 {
-		ref = b.Close
-	}
-	if ref <= 0 {
+		b.LimitSource = "none"
 		return
 	}
 	pct := 0.10
@@ -446,12 +467,9 @@ func fillConventionalLimits(b *types.Bar, board types.Board, isST bool) {
 			pct = 0.20
 		}
 	}
-	if b.HighLimit <= 0 {
-		b.HighLimit = ref * (1 + pct)
-	}
-	if b.LowLimit <= 0 {
-		b.LowLimit = ref * (1 - pct)
-	}
+	b.HighLimit = ref * (1 + pct)
+	b.LowLimit = ref * (1 - pct)
+	b.LimitSource = "pre_close"
 }
 
 // ST implements data.Provider (best-effort snapshot; may be empty with note in helper).

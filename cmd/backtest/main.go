@@ -23,15 +23,28 @@ import (
 )
 
 func resolveCorpActionsPath(cfg config.Config) (path string, loaded bool, err error) {
-	cands := make([]string, 0, 3)
-	if strings.TrimSpace(cfg.Data.CorpActionsPath) != "" {
-		cands = append(cands, cfg.Data.CorpActionsPath)
+	explicit := strings.TrimSpace(cfg.Data.CorpActionsPath)
+	if explicit != "" {
+		st, e := os.Stat(explicit)
+		if e != nil {
+			return "", false, fmt.Errorf("data.corp_actions_path %s: %w", explicit, e)
+		}
+		if st.IsDir() {
+			return "", false, fmt.Errorf("data.corp_actions_path %s is a directory", explicit)
+		}
+		return explicit, true, nil
 	}
-	if cfg.Data.FixtureDir != "" {
-		cands = append(cands, filepath.Join(cfg.Data.FixtureDir, "corp_actions.json"))
-	}
-	if cfg.Data.AKShareCacheDir != "" {
-		cands = append(cands, filepath.Join(cfg.Data.AKShareCacheDir, "corp_actions.json"))
+	provider := strings.ToLower(strings.TrimSpace(cfg.Data.Provider))
+	cands := make([]string, 0, 1)
+	switch provider {
+	case "", "fixture":
+		if cfg.Data.FixtureDir != "" {
+			cands = append(cands, filepath.Join(cfg.Data.FixtureDir, "corp_actions.json"))
+		}
+	case "akshare":
+		if cfg.Data.AKShareCacheDir != "" {
+			cands = append(cands, filepath.Join(cfg.Data.AKShareCacheDir, "corp_actions.json"))
+		}
 	}
 	for _, p := range cands {
 		if p == "" {
@@ -41,8 +54,8 @@ func resolveCorpActionsPath(cfg config.Config) (path string, loaded bool, err er
 			return p, true, nil
 		}
 	}
-	if cfg.Data.StrictPIT {
-		return "", false, fmt.Errorf("strict PIT: corp-action records not loaded (missing file cannot default to no events; set data.corp_actions_path)")
+	if cfg.Data.StrictPIT || provider == "akshare" {
+		return "", false, fmt.Errorf("strict/formal: corp-action records not loaded for provider %q (missing file cannot default to no events; fixture files are not used as akshare fallback; set data.corp_actions_path)", provider)
 	}
 	return "", false, nil
 }
@@ -270,12 +283,18 @@ func main() {
 	}
 	var corpActions []types.CorpAction
 	if corpLoaded {
-		corpActions, err = backtest.LoadCorpActionsFile(corpPath)
-		if err != nil {
+		snap, loadErr := backtest.LoadCorpActionsSnapshot(corpPath)
+		if loadErr != nil {
+			fmt.Fprintf(os.Stderr, "corp actions: %v\n", loadErr)
+			os.Exit(1)
+		}
+		if err := backtest.RequireFormalCorpActionsMeta(cfg.Data.Provider, snap); err != nil {
 			fmt.Fprintf(os.Stderr, "corp actions: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Fprintf(os.Stderr, "corp actions: loaded %d event(s) from %s\n", len(corpActions), corpPath)
+		corpActions = snap.Events
+		fmt.Fprintf(os.Stderr, "corp actions: loaded %d event(s) from %s source=%s complete=%v coverage=%s..%s\n",
+			len(corpActions), corpPath, snap.Source, snap.Complete, snap.CoverageStart, snap.CoverageEnd)
 	}
 
 	eng := &backtest.Engine{

@@ -94,14 +94,25 @@ func BuildReportWithExtras(cfg config.Config, snaps []types.DailySnapshot, fills
 	order := make([]string, 0, len(split.Segments))
 	for _, b := range split.Segments {
 		segSnaps := FilterSnaps(snaps, b)
-		metricSnaps := FilterSnapsWithBaseline(snaps, b)
+		withBase := FilterSnapsWithBaseline(snaps, b)
+		var baseline *types.DailySnapshot
+		if len(withBase) > len(segSnaps) {
+			b0 := withBase[0]
+			baseline = &b0
+		}
 		segFills := FilterFills(fills, b)
-		segBench := filterBench(bench, metricSnaps)
+		curve := segSnaps
+		if baseline != nil {
+			curve = withBase
+		}
+		segBench := filterBench(bench, curve)
 		min := MetricsInput{
-			Snaps:     metricSnaps,
-			Fills:     segFills,
-			Benchmark: segBench,
-			RiskFree:  cfg.Backtest.RiskFree,
+			Snaps:          segSnaps,
+			Baseline:       baseline,
+			ExpectBaseline: !b.Exclusive.Time().IsZero(),
+			Fills:          segFills,
+			Benchmark:      segBench,
+			RiskFree:       cfg.Backtest.RiskFree,
 		}
 		m := ComputeMetricsFull(min)
 		sr := SegmentReport{
@@ -114,7 +125,7 @@ func BuildReportWithExtras(cfg config.Config, snaps []types.DailySnapshot, fills
 			sr.StartDate = segSnaps[0].TradeDate.String()
 			sr.EndDate = segSnaps[len(segSnaps)-1].TradeDate.String()
 		}
-		enrichSegment(&sr, min, extras, metricSnaps)
+		enrichSegment(&sr, min, extras, segSnaps)
 		key := string(b.Name)
 		r.Segments[key] = sr
 		order = append(order, key)

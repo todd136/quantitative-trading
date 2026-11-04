@@ -52,6 +52,7 @@ type barJSON struct {
 	AdjFactor   float64 `json:"adj_factor"`
 	Suspended   bool    `json:"suspended"`
 	LimitStatus string  `json:"limit_status"`
+	LimitSource string  `json:"limit_source"`
 }
 
 type barsResult struct {

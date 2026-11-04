@@ -115,6 +115,9 @@ func (e *Engine) ApplyTargets(state *PortfolioState, execDate types.TradeDate, t
 		if err != nil {
 			return fmt.Errorf("open nav %s %s: %w", l.TSCode, execDate, err)
 		}
+		if q.Missing && e.Cfg.Data.StrictQuotes {
+			return fmt.Errorf("%w: unknown missing quote %s on %s (strict_quotes; will not carry last close as a formal result)", ErrMissingPrice, l.TSCode, execDate)
+		}
 		nav += l.Shares * q.Price
 	}
 	if nav <= 0 {
@@ -460,6 +463,9 @@ func (e *Engine) MarkNAV(state *PortfolioState, t types.TradeDate) (types.DailyS
 		if err != nil {
 			return types.DailySnapshot{}, fmt.Errorf("mark nav %s: %w", t, err)
 		}
+		if q.Missing && e.Cfg.Data.StrictQuotes {
+			return types.DailySnapshot{}, fmt.Errorf("%w: unknown missing quote %s on %s (strict_quotes; will not carry last close as a formal result)", ErrMissingPrice, code, t)
+		}
 		pxByCode[code] = q.Price
 		equity += sh * q.Price
 		if q.Halt {
@@ -516,11 +522,44 @@ func WriteSnapshots(outDir string, snaps []types.DailySnapshot) (string, error) 
 		return "", err
 	}
 	defer f.Close()
-	fmt.Fprintln(f, "trade_date,nav,cash")
+	fmt.Fprintln(f, "trade_date,nav,cash,receivable,halt_n,missing_n")
 	for _, s := range snaps {
-		fmt.Fprintf(f, "%s,%.6f,%.6f\n", s.TradeDate.String(), s.NAV, s.Cash)
+		fmt.Fprintf(f, "%s,%.6f,%.6f,%.6f,%d,%d\n",
+			s.TradeDate.String(), s.NAV, s.Cash, s.Receivable, len(s.HaltValued), len(s.MissingValued))
+	}
+	if err := writeValuationMarks(outDir, snaps); err != nil {
+		return path, err
 	}
 	return path, nil
+}
+
+func writeValuationMarks(outDir string, snaps []types.DailySnapshot) error {
+	path := filepath.Join(outDir, "valuation_marks.csv")
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	fmt.Fprintln(f, "trade_date,ts_code,price,as_of,source,reason,market_value,nav_weight")
+	for _, s := range snaps {
+		codes := make([]types.SecurityID, 0, len(s.CarryMarks))
+		for c := range s.CarryMarks {
+			codes = append(codes, c)
+		}
+		sort.Slice(codes, func(i, j int) bool { return codes[i] < codes[j] })
+		for _, c := range codes {
+			m := s.CarryMarks[c]
+			sh := s.Holdings[c]
+			mv := sh * m.Price
+			w := 0.0
+			if s.NAV > 0 {
+				w = mv / s.NAV
+			}
+			fmt.Fprintf(f, "%s,%s,%.6f,%s,%s,%s,%.6f,%.8f\n",
+				s.TradeDate.String(), c, m.Price, m.AsOf.String(), m.Source, m.Reason, mv, w)
+		}
+	}
+	return nil
 }
 
 // WriteFills dumps fills CSV.

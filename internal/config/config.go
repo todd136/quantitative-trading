@@ -186,6 +186,9 @@ type DataConfig struct {
 	// CorpActionsPath is an optional JSON snapshot of corporate actions.
 	// Strict PIT refuses to default a missing file to "no events".
 	CorpActionsPath string `yaml:"corp_actions_path"`
+	// StrictQuotes fail-closes unknown missing bars (not a confirmed halt).
+	// Independent of StrictPIT (financials / ST / MV). Default false = diagnostic carry.
+	StrictQuotes bool `yaml:"strict_quotes"`
 }
 
 // PaperExportConfig controls simulation / paper-trading target-list export.

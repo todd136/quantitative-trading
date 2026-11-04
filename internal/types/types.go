@@ -65,6 +65,8 @@ type Bar struct {
 	AdjFactor   float64
 	Suspended   bool
 	LimitStatus string // optional vendor enum
+	// LimitSource is official | pre_close | none. Empty on old caches is treated as untrusted.
+	LimitSource string
 }
 
 // CloseAdj returns close * adj_factor.

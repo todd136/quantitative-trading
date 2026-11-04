@@ -479,9 +479,15 @@ def cmd_bars(args: argparse.Namespace) -> int:
             vol = _f(row[vol_c]) if vol_c else 0.0
             pre = _f(row[pre_c]) if pre_c else 0.0
             close = _f(row[close_c])
-            ref = pre if pre > 0 else close
-            hi_lim = ref * (1.0 + pct) if ref > 0 else 0.0
-            lo_lim = ref * (1.0 - pct) if ref > 0 else 0.0
+            # Open limits must not be inferred from same-day close.
+            if pre > 0:
+                hi_lim = pre * (1.0 + pct)
+                lo_lim = pre * (1.0 - pct)
+                limit_source = "pre_close"
+            else:
+                hi_lim = 0.0
+                lo_lim = 0.0
+                limit_source = "none"
             bars.append(
                 {
                     "trade_date": _ymd_dash(row[date_c]),
@@ -498,11 +504,12 @@ def cmd_bars(args: argparse.Namespace) -> int:
                     "adj_factor": 1.0,
                     "suspended": vol == 0.0,
                     "limit_status": "",
+                    "limit_source": limit_source,
                 }
             )
         note = (
-            f"high/low_limit from pre_close×(1±{pct:.0%}) board={board or 'unknown'} "
-            "(AKShare daily hist lacks official limit prices; not inventing fills)"
+            f"high/low_limit from pre_close×(1±{pct:.0%}) only (never same-day close); "
+            f"board={board or 'unknown'} (AKShare daily hist lacks official limit prices; not inventing fills)"
         )
         _emit({"symbol": ts, "bars": bars, "source": source, "note": note}, args.out)
         return 0

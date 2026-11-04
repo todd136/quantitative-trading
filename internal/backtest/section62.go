@@ -181,14 +181,26 @@ func ComputeYearlyMetrics(snaps []types.DailySnapshot, in MetricsInput) []Yearly
 		benchByYear[y] = append(benchByYear[y], b)
 	}
 
+	var prevEnd types.DailySnapshot
+	hasPrev := false
+	if in.Baseline != nil {
+		prevEnd = *in.Baseline
+		hasPrev = true
+	}
 	out := make([]YearlyMetrics, 0, len(order))
 	for _, y := range order {
 		b := byYear[y]
+		var yearBase *types.DailySnapshot
+		if hasPrev && len(b.snaps) > 0 && prevEnd.TradeDate.Before(b.snaps[0].TradeDate) {
+			cp := prevEnd
+			yearBase = &cp
+		}
 		ym := YearlyMetrics{
 			Year:       y,
 			NSnapshots: len(b.snaps),
 			Metrics: ComputeMetricsFull(MetricsInput{
 				Snaps:     b.snaps,
+				Baseline:  yearBase,
 				Fills:     fillByYear[y],
 				Benchmark: benchByYear[y],
 				RiskFree:  in.RiskFree,
@@ -197,6 +209,8 @@ func ComputeYearlyMetrics(snaps []types.DailySnapshot, in MetricsInput) []Yearly
 		if len(b.snaps) > 0 {
 			ym.StartDate = b.snaps[0].TradeDate.String()
 			ym.EndDate = b.snaps[len(b.snaps)-1].TradeDate.String()
+			prevEnd = b.snaps[len(b.snaps)-1]
+			hasPrev = true
 		}
 		out = append(out, ym)
 	}

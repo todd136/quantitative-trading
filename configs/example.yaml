@@ -61,6 +61,7 @@ data:
   akshare_helper: "scripts/akshare_fetch.py"
   akshare_cache_dir: "testdata/akshare_cache"
   strict_pit: true             # fail-closed: reject announce≈period / snapshot MV / backfilled ST·industry
+  strict_quotes: true          # fail-closed: unknown missing bars (independent of strict_pit)
 llm:
   enabled: false
   weight: 0.0

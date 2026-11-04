@@ -1,1 +1,8 @@
-[]
+{
+  "source": "testdata/fixtures",
+  "provider": "fixture",
+  "coverage_start": "2023-01-01",
+  "coverage_end": "2025-03-31",
+  "complete": true,
+  "events": []
+}

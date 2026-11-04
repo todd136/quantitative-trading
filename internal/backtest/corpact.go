@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"strings"
 
 	"quantitative-trading/internal/types"
 )
@@ -27,18 +28,19 @@ const (
 
 // Entitlement is a captured record-date claim waiting to be credited.
 type Entitlement struct {
-	TSCode             types.SecurityID
-	RecordDate         types.TradeDate
-	ExDate             types.TradeDate
-	CashPayDate        types.TradeDate
-	SharesTradableDate types.TradeDate
-	SharesAtRecord     float64
-	CashPerShare       float64
-	BonusRatio         float64
-	TransferRatio      float64
-	ReceivableAccrued  bool
-	CashCredited       bool
-	SharesCredited     bool
+	TSCode                types.SecurityID
+	RecordDate            types.TradeDate
+	ExDate                types.TradeDate
+	CashPayDate           types.TradeDate
+	SharesTradableDate    types.TradeDate
+	SharesAtRecord        float64
+	CashPerShare          float64
+	BonusRatio            float64
+	TransferRatio         float64
+	ReceivableAccrued     bool
+	ReceivableOutstanding float64 // this event's accrued cash, not a global pool
+	CashCredited          bool
+	SharesCredited        bool
 }
 
 // CorpActionSupported reports whether kind is implemented (cash + bonus/transfer).
@@ -72,16 +74,28 @@ func parseOptionalDate(s string) (types.TradeDate, error) {
 	return types.ParseTradeDate(s)
 }
 
-// LoadCorpActionsFile reads a JSON array of corporate actions.
-func LoadCorpActionsFile(path string) ([]types.CorpAction, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("corp actions %s: %w", path, err)
-	}
-	var rows []corpActionJSON
-	if err := json.Unmarshal(data, &rows); err != nil {
-		return nil, fmt.Errorf("corp actions %s: %w", path, err)
-	}
+// CorpActionsSnapshot is a loaded corporate-action file plus provenance.
+type CorpActionsSnapshot struct {
+	Path          string
+	Source        string
+	Provider      string
+	CoverageStart string
+	CoverageEnd   string
+	Complete      bool
+	Events        []types.CorpAction
+	BareArray     bool
+}
+
+type corpActionsFileJSON struct {
+	Source        string           `json:"source"`
+	Provider      string           `json:"provider"`
+	CoverageStart string           `json:"coverage_start"`
+	CoverageEnd   string           `json:"coverage_end"`
+	Complete      bool             `json:"complete"`
+	Events        []corpActionJSON `json:"events"`
+}
+
+func convertCorpActionRows(path string, rows []corpActionJSON) ([]types.CorpAction, error) {
 	out := make([]types.CorpAction, 0, len(rows))
 	for i, r := range rows {
 		a := types.CorpAction{
@@ -111,6 +125,63 @@ func LoadCorpActionsFile(path string) ([]types.CorpAction, error) {
 		out = append(out, a)
 	}
 	return out, nil
+}
+
+// LoadCorpActionsSnapshot reads a JSON array (legacy) or an object with provenance.
+func LoadCorpActionsSnapshot(path string) (CorpActionsSnapshot, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return CorpActionsSnapshot{}, fmt.Errorf("corp actions %s: %w", path, err)
+	}
+	var rows []corpActionJSON
+	if err := json.Unmarshal(data, &rows); err == nil {
+		ev, e := convertCorpActionRows(path, rows)
+		if e != nil {
+			return CorpActionsSnapshot{}, e
+		}
+		return CorpActionsSnapshot{Path: path, Events: ev, BareArray: true}, nil
+	}
+	var wrap corpActionsFileJSON
+	if err := json.Unmarshal(data, &wrap); err != nil {
+		return CorpActionsSnapshot{}, fmt.Errorf("corp actions %s: %w", path, err)
+	}
+	ev, e := convertCorpActionRows(path, wrap.Events)
+	if e != nil {
+		return CorpActionsSnapshot{}, e
+	}
+	return CorpActionsSnapshot{
+		Path:          path,
+		Source:        wrap.Source,
+		Provider:      wrap.Provider,
+		CoverageStart: wrap.CoverageStart,
+		CoverageEnd:   wrap.CoverageEnd,
+		Complete:      wrap.Complete,
+		Events:        ev,
+	}, nil
+}
+
+// LoadCorpActionsFile reads events from a corporate-action snapshot (array or object).
+func LoadCorpActionsFile(path string) ([]types.CorpAction, error) {
+	snap, err := LoadCorpActionsSnapshot(path)
+	if err != nil {
+		return nil, err
+	}
+	return snap.Events, nil
+}
+
+// RequireFormalCorpActionsMeta rejects bare arrays / incomplete provenance for akshare runs.
+func RequireFormalCorpActionsMeta(provider string, snap CorpActionsSnapshot) error {
+	p := strings.ToLower(strings.TrimSpace(provider))
+	if p != "akshare" {
+		return nil
+	}
+	if snap.BareArray {
+		return fmt.Errorf("corp actions: akshare snapshot must be an object with source, coverage_start, coverage_end, complete (bare array not allowed)")
+	}
+	if strings.TrimSpace(snap.Source) == "" || !snap.Complete || snap.CoverageStart == "" || snap.CoverageEnd == "" {
+		return fmt.Errorf("corp actions: akshare snapshot missing source/coverage/complete declaration")
+	}
+	return nil
 }
 
 func normalizeActionDates(a types.CorpAction) types.CorpAction {
@@ -218,18 +289,20 @@ func (e *Engine) applyOpenCredits(state *PortfolioState, t types.TradeDate) {
 		cashAmt := RoundMoney(ent.SharesAtRecord * ent.CashPerShare)
 		if !ent.ReceivableAccrued {
 			if t.Before(pay) && cashAmt > 0 {
-				state.Receivable += cashAmt
+				state.Receivable = RoundMoney(state.Receivable + cashAmt)
+				ent.ReceivableOutstanding = cashAmt
 			}
 			ent.ReceivableAccrued = true
 		}
 		if !ent.CashCredited && !t.Before(pay) {
-			if cashAmt > 0 {
-				if state.Receivable+1e-12 >= cashAmt {
-					state.Receivable = RoundMoney(state.Receivable - cashAmt)
-					if state.Receivable < 0 {
-						state.Receivable = 0
-					}
+			if ent.ReceivableOutstanding > 0 {
+				state.Receivable = RoundMoney(state.Receivable - ent.ReceivableOutstanding)
+				if state.Receivable < 0 {
+					state.Receivable = 0
 				}
+				ent.ReceivableOutstanding = 0
+			}
+			if cashAmt > 0 {
 				state.Cash = RoundMoney(state.Cash + cashAmt)
 			}
 			ent.CashCredited = true
