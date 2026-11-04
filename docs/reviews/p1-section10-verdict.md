@@ -22,6 +22,7 @@
 ## 修复
 
 - 分支：`research/fix-backtest-p0-nav-pit-exec`（不合 main）
+- tip SHA：`e58d4d1dee21367ba6972ac469fcd4f431709878`（相对基线 `ac8ce72`）
 - 改动路径：`cmd/backtest/main.go`，`internal/backtest/{engine,corpact,metrics,report,section62}.go`，`internal/config/config.go`，`internal/types/types.go`，`internal/data/akshare/{provider,schema}.go`，`scripts/akshare_fetch.py`，`testdata/fixtures/corp_actions.json`，`configs/example.yaml`，`configs/akshare_short_formal.yaml`，`internal/backtest/independent_review_test.go`，`cmd/backtest/independent_review_test.go`，`internal/data/akshare/asof_internal_test.go`
 
 ### 测试
@@ -31,6 +32,6 @@ go test ./internal/backtest ./cmd/backtest -run TestReview -count=1
 go test ./... -count=1
 ```
 
-结果：全部通过。
+结果：`TestReview` 9 项通过；`go test ./... -count=1` 全部通过。
 
 未修项：无（A–F 均已改）。采集/校验/回测只读快照分离与 AI 成分表仍不在第十节范围。
