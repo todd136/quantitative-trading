@@ -198,3 +198,58 @@ func TestReviewSnapshotMetaAccepted(t *testing.T) {
 		t.Fatalf("meta %+v", snap)
 	}
 }
+
+// Doc §11 E: cash 1000; A receivable 100; B pay 20 same-day → cash 1020/recv 100; then A pay → cash 1120/recv 0.
+func TestReviewDocCashReceivableExact(t *testing.T) {
+	cfg := config.Default()
+	cfg.Data.StrictPIT = true
+	cfg.Costs.CommissionBps, cfg.Costs.StampTaxBps, cfg.Costs.SlippageBps = 0, 0, 0
+	a := types.SecurityID("AAA.SZ")
+	b := types.SecurityID("BBB.SZ")
+	d0 := types.NewTradeDate(2026, 7, 14)
+	rec := types.NewTradeDate(2026, 7, 15)
+	ex := types.NewTradeDate(2026, 7, 16)
+	payA := types.NewTradeDate(2026, 7, 20)
+	cal := []types.TradeDate{d0, rec, ex, payA}
+	mk := func(code types.SecurityID, d types.TradeDate, px float64) types.Bar {
+		return types.Bar{TradeDate: d, TSCode: code, Open: px, High: px, Low: px, Close: px, PreClose: px, HighLimit: px * 1.1, LowLimit: px * 0.9, AdjFactor: 1}
+	}
+	bars := map[types.SecurityID]map[string]types.Bar{
+		a: {d0.String(): mk(a, d0, 10), rec.String(): mk(a, rec, 10), ex.String(): mk(a, ex, 9), payA.String(): mk(a, payA, 9)},
+		b: {d0.String(): mk(b, d0, 20), rec.String(): mk(b, rec, 20), ex.String(): mk(b, ex, 19.8), payA.String(): mk(b, payA, 19.8)},
+	}
+	eng := &backtest.Engine{
+		Cfg: cfg, Calendar: cal, CalIndex: universe.BuildIndex(cal), Bars: bars,
+		CorpActions: []types.CorpAction{
+			{TSCode: a, Kind: backtest.CorpKindCashDividend, RecordDate: rec, ExDate: ex, CashPayDate: payA, CashPerShare: 0.10},
+			{TSCode: b, Kind: backtest.CorpKindCashDividend, RecordDate: rec, ExDate: ex, CashPayDate: ex, CashPerShare: 0.20},
+		},
+		CorpActionsLoaded: true,
+	}
+	state := &backtest.PortfolioState{
+		Cash: 1000,
+		Lots: []types.Lot{
+			{TSCode: a, Shares: 1000, AvailableFrom: d0, CostBasis: 10},
+			{TSCode: b, Shares: 100, AvailableFrom: d0, CostBasis: 20},
+		},
+	}
+	snaps, err := backtest.RunCalendar(eng, state, 0, len(cal), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var exSnap, paySnap types.DailySnapshot
+	for _, s := range snaps {
+		if s.TradeDate.Equal(ex) {
+			exSnap = s
+		}
+		if s.TradeDate.Equal(payA) {
+			paySnap = s
+		}
+	}
+	if !backtest.NearlyEqualAbs(exSnap.Cash, 1020, backtest.SampleAbsTol) || !backtest.NearlyEqualAbs(exSnap.Receivable, 100, backtest.SampleAbsTol) {
+		t.Fatalf("after B pay: cash/recv want 1020/100, got %v/%v", exSnap.Cash, exSnap.Receivable)
+	}
+	if !backtest.NearlyEqualAbs(paySnap.Cash, 1120, backtest.SampleAbsTol) || !backtest.NearlyEqualAbs(paySnap.Receivable, 0, backtest.SampleAbsTol) {
+		t.Fatalf("after A pay: cash/recv want 1120/0, got %v/%v", paySnap.Cash, paySnap.Receivable)
+	}
+}
