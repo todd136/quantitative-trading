@@ -250,7 +250,11 @@ func main() {
 	}
 	sort.Slice(codes, func(i, j int) bool { return codes[i] < codes[j] })
 	for i, code := range codes {
-		bs, _ := prov.Bars(code, dataFrom, dataTo)
+		bs, barsErr := prov.Bars(code, dataFrom, dataTo)
+		if barsErr != nil && (cfg.Data.StrictPIT || cfg.Data.StrictQuotes) {
+			fmt.Fprintf(os.Stderr, "bars preload %s: %v\n", code, barsErr)
+			os.Exit(1)
+		}
 		barLists[code] = bs
 		m := map[string]types.Bar{}
 		for _, b := range bs {
@@ -288,7 +292,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "corp actions: %v\n", loadErr)
 			os.Exit(1)
 		}
-		if err := backtest.RequireFormalCorpActionsMeta(cfg.Data.Provider, snap); err != nil {
+		if err := backtest.RequireFormalCorpActionsMeta(cfg.Data.Provider, snap, dataFrom, dataTo); err != nil {
 			fmt.Fprintf(os.Stderr, "corp actions: %v\n", err)
 			os.Exit(1)
 		}

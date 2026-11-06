@@ -201,6 +201,15 @@ func TestReviewSnapshotMetaAccepted(t *testing.T) {
 
 // Doc §11 E: cash 1000; A receivable 100; B pay 20 same-day → cash 1020/recv 100; then A pay → cash 1120/recv 0.
 func TestReviewDocCashReceivableExact(t *testing.T) {
+	reviewDocCashReceivableExact(t, false)
+}
+
+func TestConvergenceMultiEventOrder(t *testing.T) {
+	reviewDocCashReceivableExact(t, true)
+}
+
+func reviewDocCashReceivableExact(t *testing.T, reverse bool) {
+	t.Helper()
 	cfg := config.Default()
 	cfg.Data.StrictPIT = true
 	cfg.Costs.CommissionBps, cfg.Costs.StampTaxBps, cfg.Costs.SlippageBps = 0, 0, 0
@@ -232,6 +241,9 @@ func TestReviewDocCashReceivableExact(t *testing.T) {
 			{TSCode: a, Shares: 1000, AvailableFrom: d0, CostBasis: 10},
 			{TSCode: b, Shares: 100, AvailableFrom: d0, CostBasis: 20},
 		},
+	}
+	if reverse {
+		eng.CorpActions[0], eng.CorpActions[1] = eng.CorpActions[1], eng.CorpActions[0]
 	}
 	snaps, err := backtest.RunCalendar(eng, state, 0, len(cal), nil)
 	if err != nil {

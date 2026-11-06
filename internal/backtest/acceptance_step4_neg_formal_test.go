@@ -14,7 +14,7 @@ import (
 )
 
 func TestAcceptanceNegPackStrictQuotesRejects1029(t *testing.T) {
-	cache := "/workspace/quant_cache_audit_20261029_20261104/testdata/akshare_cache"
+	cache := filepath.Join("..", "..", "testdata", "samples", "cache_missing_20261029")
 	matches, err := filepath.Glob(filepath.Join(cache, "bars_000623.SZ_*_2026-10-29.json"))
 	if err != nil || len(matches) == 0 {
 		t.Fatalf("setup: %v matches=%v", err, matches)
@@ -32,9 +32,13 @@ func TestAcceptanceNegPackStrictQuotesRejects1029(t *testing.T) {
 	}
 	var bf struct {
 		Bars []struct {
-			TradeDate string  `json:"trade_date"`
-			TSCode    string  `json:"ts_code"`
-			Open, High, Low, Close, PreClose, HighLimit, LowLimit, AdjFactor float64
+			TradeDate              string `json:"trade_date"`
+			TSCode                 string `json:"ts_code"`
+			Open, High, Low, Close float64
+			PreClose               float64 `json:"pre_close"`
+			HighLimit              float64 `json:"high_limit"`
+			LowLimit               float64 `json:"low_limit"`
+			AdjFactor              float64 `json:"adj_factor"`
 		} `json:"bars"`
 	}
 	if err := json.Unmarshal(raw, &bf); err != nil {
@@ -64,7 +68,7 @@ func TestAcceptanceNegPackStrictQuotesRejects1029(t *testing.T) {
 	_, err = eng.MarkNAV(state, d29)
 	report := map[string]any{"file": filepath.Base(path), "code": string(code), "has_bar_20261029": has1029, "err": fmtErr(err)}
 	b, _ := json.MarshalIndent(report, "", "  ")
-	_ = os.WriteFile("/workspace/quantitative-trading/output/p1_acceptance_20261105T032237Z/step4/neg/formal_reject.json", b, 0o644)
+	t.Log(string(b))
 	if has1029 {
 		t.Fatalf("negative pack unexpectedly has 10/29 bar in %s", path)
 	}

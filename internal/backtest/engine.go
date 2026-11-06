@@ -458,7 +458,13 @@ func (e *Engine) MarkNAV(state *PortfolioState, t types.TradeDate) (types.DailyS
 		holdings[l.TSCode] += l.Shares
 	}
 	pxByCode := map[types.SecurityID]float64{}
-	for code, sh := range holdings {
+	codes := make([]types.SecurityID, 0, len(holdings))
+	for code := range holdings {
+		codes = append(codes, code)
+	}
+	sort.Slice(codes, func(i, j int) bool { return codes[i] < codes[j] })
+	for _, code := range codes {
+		sh := holdings[code]
 		q, err := e.quoteClose(code, t)
 		if err != nil {
 			return types.DailySnapshot{}, fmt.Errorf("mark nav %s: %w", t, err)

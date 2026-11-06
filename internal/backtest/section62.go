@@ -22,6 +22,7 @@ Not investment advice; research diagnostic only.`
 
 // FactorLayerMethodNote documents layered / long-short factor return construction.
 const FactorLayerMethodNote = `Cross-sectional factor layers: each day rank names by factor score into Q quantiles (default 5);
+equal scores are ordered by security code ascending for reproducible quantile membership.
 layer return = equal-weight mean of that day's forward returns in the quantile.
 Long-short = top quantile mean − bottom quantile mean. Only computed when real scores AND forward returns are provided — never invented.`
 
@@ -652,7 +653,12 @@ func ComputeFactorLayers(panels []DailyFactorPanel, nQ int) []FactorLayerResult 
 			if len(pairs) < nQ {
 				continue
 			}
-			sort.Slice(pairs, func(i, j int) bool { return pairs[i].sc < pairs[j].sc })
+			sort.Slice(pairs, func(i, j int) bool {
+				if pairs[i].sc == pairs[j].sc {
+					return pairs[i].code < pairs[j].code
+				}
+				return pairs[i].sc < pairs[j].sc
+			})
 			// Assign to quantiles by rank index.
 			for qi := 0; qi < nQ; qi++ {
 				lo := qi * len(pairs) / nQ

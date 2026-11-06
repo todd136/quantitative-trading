@@ -210,6 +210,8 @@ type DailySnapshot struct {
 	Weights    map[SecurityID]float64
 	Turnover   float64
 	CostTotal  float64
+	// ActivityObserved distinguishes a complete zero-activity day from absent data.
+	ActivityObserved bool
 	// HaltValued lists holdings marked to last valid price because the name was
 	// a confirmed halt (bar.Suspended or suspend calendar). Empty when none.
 	HaltValued map[SecurityID]float64

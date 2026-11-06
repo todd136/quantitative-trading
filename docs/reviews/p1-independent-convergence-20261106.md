@@ -1,0 +1,52 @@
+# P1 独立收敛复核（2026-11-06）
+
+本次基于用户未推送 tip `b3d9d4188c9c4eaac63eb25ac066af31838837a6`，不改用户远端和 main。修复和测试仅在独立 review 分支。
+
+## 输入与版本
+
+- U1 bundle SHA-256：`161fb075d18886e555c8f4f867ff96ea82175b9fc9250f1b92f5943c6efcb096`；完整历史和 tip 均验证通过。
+- U2 SHA-256：`6747ee7e56e32afffeb4dc01ee83d0406facb00e5b58d1d6a7f8e086deebc5e1`；四个 CSV 哈希通过；本次生成脚本能逐字节重建四个 CSV。
+- 原工作区未跟踪项 `.venv`、`cmd/checkbars/` 不属于 bundle 的已提交生产代码；本次测试不依赖它们。
+- 提交链已核实：ac8ce72 → e58d4d1 → 88daf05 → b6c9c1a → b3d9d41。
+
+## 本次修复
+
+1. 因子分层同分股票按证券代码排序；净值按证券代码固定累加，避免 map 遍历次序导致漂移。
+2. 引入 ActivityObserved，区分已确认零成交的零费用/零换手与缺数据的 NA。只有完成活动汇总的快照标记已观测。
+3. 严格 AKShare provider 缺当日及此前有效复权记录时明确失败，不再沿用默认因子 1；CLI 严格模式向上传递 bars 读取错误，避免静默缩小候选池。
+4. 公司行动元数据校验 provider、日期格式、起止顺序和加载日期范围。complete 声明仍需原始数据支持，代码检查不能证明事件全集真实完整。
+5. 原负例测试改用随仓库保存的原始 000623 缓存，消除开发机绝对路径依赖，修正 JSON 字段标签；原始缓存内容未改。
+
+## 实际验证结果
+
+- 首次在 b3d9d41 全套执行：123 个顶层测试通过，1 个失败，失败原因是旧负例依赖开发机绝对路径。
+- 修复后 Go 全套：135 个顶层测试通过、0 失败、0 跳过；go vet 退出码 0；Python 公告日期 3 项通过。
+- 在 ac8ce72 独立 worktree 运行提供的 before adapters：7 个目标测试均因预期断言失败；其中 C 是旧 exact-match 行为模拟，不单独作为旧 provider 集成证据。
+- 新增 provider 实际读取稀疏因子、无历史因子拒绝、污染缓存限制价拒绝、真实 Python 采集函数（受控上游）到 provider/universe/撮合的测试。
+- 新增多事件顺序、重复事件拒绝、跨年收益/成本、无基准显式说明、公司行动覆盖范围测试。
+- CLI 重复比较：忽略 generated_at；数值绝对容差 1e-10、相对容差 1e-9，其余值及结构一致。nav/fills/paper_targets 字节一致。
+- 构造权益 CLI：单股票周频、现金分红和转增、延后付款；两次运行逐日 cash/receivable/NAV 与独立账本一致，初始买入成交核对通过。此案例没有真实收益含义。
+- 完整 CLI 删除持仓日行情后拒绝，且不生成 report.json；AKShare 缓存缺复权的 provider 错误也能从 CLI 正确退出。
+
+## 复现
+
+```bash
+go test ./... -count=1 -json
+go vet ./...
+python3 -m unittest discover -s scripts -p test_akshare_fetch_pit.py -v
+go build -o /tmp/quant-backtest ./cmd/backtest
+python3 scripts/review_e2e.py --binary /tmp/quant-backtest --out /tmp/quant-review-new-run
+```
+
+最后一个命令需要 PyYAML，输出目录必须不存在。所有市场输入由仓库已跟踪 fixture 生成；测试数据为构造数据，不覆盖真实市场制度的所有情形。原始旧缓存仅作为未知缺价负例。
+
+## 尚未签收的部分
+
+- 尚未完成真实 AKShare 短窗口的全链路正式验收。新浪日线新拉取已取得 000623 2026-10-22 至 10-30 七行，但缺有效 pre_close，不能因此生成开盘限制价；新脚本正确输出 limit_source=none、上下限=0。
+- 真实事件全集与公告来源、税费/特殊公司行动、可交易股份日、历史行业/ST/停牌、有效参考价等仍需按样本核验。
+- 构造 CLI 暂未输出逐日逐事件应收子账或完整逐股估值明细；已有日净值/现金/应收、成交与单元测试能验证本次案例，但不能替代真实样本的完整审计输出。
+- 当前不得发布 main/_v12_n40 收益胜率或行业排名；不得把构造验收报表当作回测成果。
+
+## 分工
+
+R1、R2、R4、R6 的本轮目标已有测试/代码证据；R3 的受控路径通过，真实上游有效性待验；R5 构造 CLI 通过，真实端到端与详细权益审计仍待完成。可访问的采集与检查继续由复核方承担，需要用户材料时在 Google 文档第十二节明确列出。

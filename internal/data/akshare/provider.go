@@ -392,6 +392,8 @@ func (p *Provider) Bars(tsCode types.SecurityID, from, to types.TradeDate) ([]ty
 		}
 		if v, ok := adjFactorAsOf(adjRows, b.TradeDate); ok {
 			adj = v
+		} else if p.cfg.StrictPIT {
+			return nil, fmt.Errorf("%w: adj %s has no valid historical factor on %s (bar default is not evidence)", ErrStrictPIT, tsCode, b.TradeDate)
 		}
 		code := b.TSCode
 		if code == "" {
@@ -430,7 +432,7 @@ func adjFactorAsOf(rows []adjRowJSON, date string) (float64, bool) {
 	var val float64
 	found := false
 	for _, r := range rows {
-		if r.TradeDate == "" || r.AdjFactor == 0 || r.TradeDate > date {
+		if r.TradeDate == "" || r.AdjFactor <= 0 || r.TradeDate > date {
 			continue
 		}
 		if !found || r.TradeDate > best {

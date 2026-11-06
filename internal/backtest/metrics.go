@@ -242,7 +242,9 @@ func fillTurnoverCost(snaps []types.DailySnapshot, fills []types.Fill, m *Metric
 	hasCost := false
 	sumTO := 0.0
 	sumCost := 0.0
+	allObserved := len(snaps) > 0
 	for _, s := range snaps {
+		allObserved = allObserved && s.ActivityObserved
 		if s.Turnover != 0 {
 			hasTO = true
 		}
@@ -251,6 +253,9 @@ func fillTurnoverCost(snaps []types.DailySnapshot, fills []types.Fill, m *Metric
 			hasCost = true
 		}
 		sumCost += s.CostTotal
+	}
+	if allObserved {
+		hasTO, hasCost = true, true
 	}
 	// If snaps lack activity fields, derive from fills (two-way = sum amount / day NAV).
 	if !hasTO && len(fills) > 0 {
@@ -428,6 +433,7 @@ func AnnotateDailyActivity(snaps []types.DailySnapshot, fills []types.Fill) {
 		byDate[f.TradeDate.String()] = a
 	}
 	for i := range snaps {
+		snaps[i].ActivityObserved = true
 		a := byDate[snaps[i].TradeDate.String()]
 		snaps[i].CostTotal = a.cost
 		if snaps[i].NAV > 0 {

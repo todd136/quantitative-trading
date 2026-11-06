@@ -170,7 +170,7 @@ func LoadCorpActionsFile(path string) ([]types.CorpAction, error) {
 }
 
 // RequireFormalCorpActionsMeta rejects bare arrays / incomplete provenance for akshare runs.
-func RequireFormalCorpActionsMeta(provider string, snap CorpActionsSnapshot) error {
+func RequireFormalCorpActionsMeta(provider string, snap CorpActionsSnapshot, window ...types.TradeDate) error {
 	p := strings.ToLower(strings.TrimSpace(provider))
 	if p != "akshare" {
 		return nil
@@ -180,6 +180,20 @@ func RequireFormalCorpActionsMeta(provider string, snap CorpActionsSnapshot) err
 	}
 	if strings.TrimSpace(snap.Source) == "" || !snap.Complete || snap.CoverageStart == "" || snap.CoverageEnd == "" {
 		return fmt.Errorf("corp actions: akshare snapshot missing source/coverage/complete declaration")
+	}
+	if strings.ToLower(strings.TrimSpace(snap.Provider)) != p {
+		return fmt.Errorf("corp actions: snapshot provider %q does not match %q", snap.Provider, p)
+	}
+	start, e1 := types.ParseTradeDate(snap.CoverageStart)
+	end, e2 := types.ParseTradeDate(snap.CoverageEnd)
+	if e1 != nil || e2 != nil || start.After(end) {
+		return fmt.Errorf("corp actions: invalid coverage dates %s..%s", snap.CoverageStart, snap.CoverageEnd)
+	}
+	if len(window) != 0 && len(window) != 2 {
+		return fmt.Errorf("corp actions: coverage check needs start and end")
+	}
+	if len(window) == 2 && (start.After(window[0]) || end.Before(window[1])) {
+		return fmt.Errorf("corp actions: declared coverage %s..%s does not cover loaded data %s..%s", start, end, window[0], window[1])
 	}
 	return nil
 }

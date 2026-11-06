@@ -57,3 +57,23 @@ func TestReviewFixtureProviderMayUseFixtureDir(t *testing.T) {
 		t.Fatalf("fixture provider path=%s loaded=%v err=%v", path, loaded, err)
 	}
 }
+
+func TestConvergenceAksharePrefersRealCacheOverEmptyFixture(t *testing.T) {
+	fix, cache := t.TempDir(), t.TempDir()
+	if err := os.WriteFile(filepath.Join(fix, "corp_actions.json"), []byte(`[]`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(cache, "corp_actions.json")
+	if err := os.WriteFile(want, []byte(`{"source":"controlled-test","provider":"akshare","coverage_start":"2026-01-01","coverage_end":"2026-12-31","complete":true,"events":[{"ts_code":"000623.SZ","kind":"cash_dividend","record_date":"2026-10-22","ex_date":"2026-10-23","cash_per_share":0.1}]}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Data.Provider = "akshare"
+	cfg.Data.StrictPIT = true
+	cfg.Data.FixtureDir = fix
+	cfg.Data.AKShareCacheDir = cache
+	got, loaded, err := resolveCorpActionsPath(cfg)
+	if err != nil || !loaded || got != want {
+		t.Fatalf("selected %s loaded=%v err=%v", got, loaded, err)
+	}
+}
