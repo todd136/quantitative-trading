@@ -119,12 +119,12 @@ func RunCalendar(
 			pending = nil
 		}
 
+		e.captureRecordEntitlements(state, t)
 		snap, err := e.MarkNAV(state, t)
 		if err != nil {
 			return nil, fmt.Errorf("mark nav %s: %w", t, err)
 		}
 		snaps = append(snaps, snap)
-		e.captureRecordEntitlements(state, t)
 
 		if !portfolio.IsRebalanceDay(t, cfg.Portfolio.RebalanceFreq, cfg.Portfolio.RebalanceWeekday, e.Calendar, e.CalIndex) {
 			continue

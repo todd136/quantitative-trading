@@ -28,6 +28,7 @@ const (
 
 // Entitlement is a captured record-date claim waiting to be credited.
 type Entitlement struct {
+	Kind                  string
 	TSCode                types.SecurityID
 	RecordDate            types.TradeDate
 	ExDate                types.TradeDate
@@ -362,6 +363,7 @@ func (e *Engine) captureRecordEntitlements(state *PortfolioState, t types.TradeD
 			continue
 		}
 		state.Entitlements = append(state.Entitlements, Entitlement{
+			Kind:               a.Kind,
 			TSCode:             a.TSCode,
 			RecordDate:         a.RecordDate,
 			ExDate:             a.ExDate,

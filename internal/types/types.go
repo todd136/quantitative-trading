@@ -199,6 +199,16 @@ type ValuationMark struct {
 	Reason string    // confirmed_halt | missing_bar
 }
 
+// CorpActionMark is an immutable end-of-day claim, not a cash-flow row.
+// CashPaid is cumulative for this claim; never sum it across days.
+type CorpActionMark struct {
+	TSCode                                                        SecurityID
+	Kind                                                          string
+	RecordDate, ExDate, CashPayDate, SharesTradableDate           TradeDate
+	SharesAtRecord, CashEntitled, ReceivableOutstanding, CashPaid float64
+	SharesEntitled, SharesCredited                                float64
+}
+
 // DailySnapshot is end-of-day portfolio state for persistence.
 type DailySnapshot struct {
 	TradeDate TradeDate
@@ -220,6 +230,9 @@ type DailySnapshot struct {
 	MissingValued map[SecurityID]float64
 	// CarryMarks is the per-name audit trail (price / as-of / source / reason).
 	CarryMarks map[SecurityID]ValuationMark
+	// Valuations covers every holding, including normal trading sessions.
+	Valuations      map[SecurityID]ValuationMark
+	CorpActionMarks []CorpActionMark
 }
 
 // CorpAction is one announced corporate action. Dates are calendar dates (not inferred

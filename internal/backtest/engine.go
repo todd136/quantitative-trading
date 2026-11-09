@@ -454,6 +454,7 @@ func (e *Engine) MarkNAV(state *PortfolioState, t types.TradeDate) (types.DailyS
 	haltValued := map[types.SecurityID]float64{}
 	missingValued := map[types.SecurityID]float64{}
 	carryMarks := map[types.SecurityID]types.ValuationMark{}
+	valuations := map[types.SecurityID]types.ValuationMark{}
 	for _, l := range state.Lots {
 		holdings[l.TSCode] += l.Shares
 	}
@@ -472,6 +473,7 @@ func (e *Engine) MarkNAV(state *PortfolioState, t types.TradeDate) (types.DailyS
 		if q.Missing && e.Cfg.Data.StrictQuotes {
 			return types.DailySnapshot{}, fmt.Errorf("%w: unknown missing quote %s on %s (strict_quotes; will not carry last close as a formal result)", ErrMissingPrice, code, t)
 		}
+		valuations[code] = types.ValuationMark{Price: q.Price, AsOf: q.AsOf, Source: q.Source, Reason: q.Reason}
 		pxByCode[code] = q.Price
 		equity += sh * q.Price
 		if q.Halt {
@@ -505,15 +507,17 @@ func (e *Engine) MarkNAV(state *PortfolioState, t types.TradeDate) (types.DailyS
 		carryMarks = nil
 	}
 	return types.DailySnapshot{
-		TradeDate:     t,
-		NAV:           equity,
-		Cash:          state.Cash,
-		Receivable:    state.Receivable,
-		Holdings:      holdings,
-		Weights:       weights,
-		HaltValued:    haltValued,
-		MissingValued: missingValued,
-		CarryMarks:    carryMarks,
+		TradeDate:       t,
+		NAV:             equity,
+		Cash:            state.Cash,
+		Receivable:      state.Receivable,
+		Holdings:        holdings,
+		Weights:         weights,
+		HaltValued:      haltValued,
+		MissingValued:   missingValued,
+		CarryMarks:      carryMarks,
+		Valuations:      valuations,
+		CorpActionMarks: snapshotEntitlements(state),
 	}, nil
 }
 
@@ -534,6 +538,9 @@ func WriteSnapshots(outDir string, snaps []types.DailySnapshot) (string, error) 
 			s.TradeDate.String(), s.NAV, s.Cash, s.Receivable, len(s.HaltValued), len(s.MissingValued))
 	}
 	if err := writeValuationMarks(outDir, snaps); err != nil {
+		return path, err
+	}
+	if err := writeAuditSnapshots(outDir, snaps); err != nil {
 		return path, err
 	}
 	return path, nil

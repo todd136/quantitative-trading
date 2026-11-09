@@ -51,6 +51,25 @@ def compare(a, b, path='', diffs=None):
     elif a!=b: diffs.append([path,a,b])
     return diffs
 
+def reconcile_audit(dest):
+    _, nav = csv_read(dest/'nav.csv')
+    _, holdings = csv_read(dest/'holdings_valuation.csv')
+    _, claims = csv_read(dest/'corp_action_ledger.csv')
+    for n in nav:
+        day=n['trade_date']
+        hs=[h for h in holdings if h['trade_date']==day]
+        cs=[c for c in claims if c['trade_date']==day]
+        assert len({h['ts_code'] for h in hs})==len(hs)
+        assert len({c['event_id'] for c in cs})==len(cs)
+        for h in hs:
+            assert h['as_of']<=day
+            assert math.isclose(float(h['shares'])*float(h['price']),float(h['market_value']),abs_tol=1e-8)
+        mv=sum(float(h['market_value']) for h in hs)
+        recv=sum(float(c['receivable_outstanding']) for c in cs)
+        assert abs(float(n['cash'])+recv+mv-float(n['nav']))<.00001,(day,n,mv,recv)
+        assert abs(recv-float(n['receivable']))<.00001
+    return holdings, claims
+
 def main():
     ap=argparse.ArgumentParser();ap.add_argument('--binary',type=pathlib.Path,required=True);ap.add_argument('--out',type=pathlib.Path,required=True)
     args=ap.parse_args();out=args.out.resolve();binary=args.binary.resolve()
@@ -70,12 +89,14 @@ def main():
     a=json.loads((out/'repeat1/report.json').read_text());b=json.loads((out/'repeat2/report.json').read_text())
     differences=compare(a,b)
     result={'numeric_abs_tol':1e-10,'numeric_rel_tol':1e-9,'ignored_fields':['/generated_at'],'report_differences':differences}
-    for name in ['nav.csv','fills.csv','paper_targets.csv']:
+    for name in ['nav.csv','fills.csv','paper_targets.csv','holdings_valuation.csv','corp_action_ledger.csv']:
         x=out/'repeat1'/name;y=out/'repeat2'/name
         if x.exists() or y.exists(): result[name+'_identical']=x.read_bytes()==y.read_bytes()
     (out/'repeat_comparison.json').write_text(json.dumps(result,indent=2))
     assert not differences, differences[:5]
     assert all(v for k,v in result.items() if k.endswith('_identical'))
+
+    for n in (1,2): reconcile_audit(out/f'repeat{n}')
 
     # One-name weekly synthetic case with exact cash/share entitlement arithmetic.
     # Buy 1000@50 on 3/4. Record 3/5; ex 3/6; pay 3/7; shares tradable 3/10.
@@ -107,6 +128,19 @@ def main():
         for x,e in zip(actual,expected):
             assert x['trade_date']==e['trade_date']
             for k in ['cash','receivable','nav']:assert abs(float(x[k])-e[k])<.01,(k,x,e)
+        holdings, claims = reconcile_audit(dest)
+        for e in expected:
+            hs=[h for h in holdings if h['trade_date']==e['trade_date']]
+            assert sum(float(h['shares']) for h in hs)==e['shares']
+        for c in claims:
+            d=c['trade_date']
+            assert d>='2025-03-05'
+            assert float(c['shares_at_record'])==1000
+            assert float(c['cash_entitled'])==600
+            assert float(c['cash_paid_cumulative'])==(600 if d>='2025-03-07' else 0)
+            assert float(c['shares_credited_cumulative'])==(400 if d>='2025-03-06' else 0)
+            assert c['shares_tradable_date']=='2025-03-10'
+        assert len(claims)==4
         _,fills=csv_read(dest/'fills.csv')
         assert len(fills)==1 and fills[0]['side']=='BUY' and float(fills[0]['shares'])==1000 and float(fills[0]['price'])==50
     # Same valid event fixture, remove held-stock quote only: exercise full CLI rejection.
@@ -133,7 +167,7 @@ def main():
     assert not (out/'missing_adj_cli/report.json').exists()
     hashes={str(p.relative_to(out)):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(out.rglob('*')) if p.is_file()}
     (out/'manifest.json').write_text(json.dumps(hashes,indent=2))
-    (out/'summary.json').write_text(json.dumps({'repeat':'PASS','event_ledger':'PASS','negative_cli':'EXPECTED_REJECTION','missing_adj_cli':'EXPECTED_REJECTION','synthetic_only':True},indent=2))
+    (out/'summary.json').write_text(json.dumps({'repeat':'PASS','event_ledger':'PASS','negative_cli':'EXPECTED_REJECTION','missing_adj_cli':'EXPECTED_REJECTION','audit_reconciliation':'PASS','synthetic_only':True},indent=2))
     print('PASS: repeat, independent event ledger, negative CLI; synthetic only')
 
 if __name__=='__main__':main()
